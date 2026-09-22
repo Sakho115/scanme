@@ -23,7 +23,7 @@ import {
 export const ReportsPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'classification' | 'colleges' | 'departments'>('classification');
   const [filters, setFilters] = useState<ClassificationFilters>({
-    status: 'ALL'
+    status: 'ENTERED'
   });
   const [rows, setRows] = useState<ClassificationRow[]>([]);
   const [collegeRows, setCollegeRows] = useState<CollegeBreakdownRow[]>([]);
@@ -34,8 +34,8 @@ export const ReportsPage: React.FC = () => {
     return attendanceService.getFilterOptions();
   }, []);
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
+  const loadData = useCallback(async (isBackground = false) => {
+    if (!isBackground) setIsLoading(true);
     try {
       const [r, c, d] = await Promise.all([
         attendanceService.getClassificationRows(filters),
@@ -48,28 +48,41 @@ export const ReportsPage: React.FC = () => {
     } catch (err) {
       console.error('Failed to load reports:', err);
     } finally {
-      setIsLoading(false);
+      if (!isBackground) setIsLoading(false);
     }
   }, [filters]);
 
   useEffect(() => {
     loadData();
     const unsubscribe = attendanceService.subscribeToAttendanceUpdates(() => {
-      loadData();
+      loadData(true);
     });
+
+    // 3-second polling fallback to guarantee multi-device sync on mobile
+    const pollTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadData(true);
+      }
+    }, 3000);
+
     return () => {
       unsubscribe();
+      clearInterval(pollTimer);
     };
   }, [loadData]);
 
-  // Window focus listener for fresh data when switching tabs/windows
+  // Window focus & tab visibility listener for instant fresh data
   useEffect(() => {
-    const handleFocus = () => {
-      loadData();
+    const handleRevalidate = () => {
+      if (document.visibilityState === 'visible') {
+        loadData(true);
+      }
     };
-    window.addEventListener('focus', handleFocus);
+    window.addEventListener('focus', handleRevalidate);
+    document.addEventListener('visibilitychange', handleRevalidate);
     return () => {
-      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('focus', handleRevalidate);
+      document.removeEventListener('visibilitychange', handleRevalidate);
     };
   }, [loadData]);
 
@@ -131,7 +144,7 @@ export const ReportsPage: React.FC = () => {
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
             <button
-              onClick={loadData}
+              onClick={() => loadData()}
               disabled={isLoading}
               className="touch-target p-2.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
               title="Refresh Data"

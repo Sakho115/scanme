@@ -106,10 +106,14 @@ export function exportToCSV(
     ];
   }
 
+  const targetRows = (eventInfo && metadata?.scope !== 'EVENT')
+    ? rows.filter(r => r[eventInfo.selectedKey] === 'YES')
+    : rows;
+
   const csvRows: string[] = [];
   csvRows.push(headers.map(h => `"${h.replace(/"/g, '""')}"`).join(','));
 
-  rows.forEach((r, idx) => {
+  targetRows.forEach((r, idx) => {
     let values: any[];
     if (eventInfo) {
       const isCheckedIn = r[eventInfo.checkinKey] && r[eventInfo.checkinKey] !== 'NOT CHECKED IN';
@@ -170,12 +174,16 @@ export function exportToExcel(
   metadata?: ExportMetadata
 ): void {
   const eventInfo = resolveExportEvent(metadata);
-  const dataRows: Record<string, any>[] = [];
 
-  rows.forEach((r, idx) => {
-    if (eventInfo) {
+  // Case 1: Specific Event Export (e.g. from Event Dashboard)
+  if (eventInfo) {
+    const targetRows = metadata?.scope === 'EVENT'
+      ? rows
+      : rows.filter(r => r[eventInfo.selectedKey] === 'YES');
+
+    const dataRows = targetRows.map((r, idx) => {
       const isCheckedIn = Boolean(r[eventInfo.checkinKey] && r[eventInfo.checkinKey] !== 'NOT CHECKED IN');
-      dataRows.push({
+      return {
         '#': idx + 1,
         'Pass ID': r.passId,
         'Participant Name': r.name,
@@ -188,9 +196,83 @@ export function exportToExcel(
         'Event Attendance Status': isCheckedIn ? 'CHECKED IN' : 'NOT CHECKED IN',
         'Event Check-in Time': r[eventInfo.checkinKey] || 'NOT CHECKED IN',
         'Coordinator': r.coordinatorName
-      });
-    } else {
-      dataRows.push({
+      };
+    });
+
+    const ws = XLSX.utils.json_to_sheet(dataRows);
+    ws['!cols'] = [
+      { wch: 5 },
+      { wch: 16 },
+      { wch: 24 },
+      { wch: 26 },
+      { wch: 14 },
+      { wch: 30 },
+      { wch: 24 },
+      { wch: 10 },
+      { wch: 24 },
+      { wch: 24 },
+      { wch: 20 },
+      { wch: 18 }
+    ];
+
+    const wb = XLSX.utils.book_new();
+    const sheetName = eventInfo.name.substring(0, 31);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+
+    const cleanFilename = filename.endsWith('.xlsx') ? filename : `${filename}.xlsx`;
+    XLSX.writeFile(wb, cleanFilename);
+    return;
+  }
+
+  // Case 2: Overall Attendance Multi-Sheet Workbook
+  // Generates Sheet 1 (Overall Venue Entry) + Dedicated Sheets for each event
+  // If a participant chose 2-3 events, they appear in all 3 event sheets!
+  const wb = XLSX.utils.book_new();
+
+  // 1. Overall Venue Entry Sheet
+  const overallDataRows = rows.map((r, idx) => ({
+    '#': idx + 1,
+    'Pass ID': r.passId,
+    'Participant Name': r.name,
+    'Email': r.email || '',
+    'Phone': r.phone || '',
+    'College': r.college,
+    'Department': r.department,
+    'Year': r.year,
+    'Overall Gate Status': r.status,
+    'Gate Check-in Time': r.formattedTime,
+    'Events Interested In (Selected Events)': getInterestedEvents(r),
+    'Code Crusade Selected': r.codeCrusadeSelected || 'NO',
+    'Logic Arena Selected': r.logicArenaSelected || 'NO',
+    'UI/UX Studio Selected': r.uiuxStudioSelected || 'NO',
+    'Tech Tactics Selected': r.techTacticsSelected || 'NO',
+    'Pixel Pulse Selected': r.pixelPulseSelected || 'NO',
+    'Gate Coordinator': r.coordinatorName
+  }));
+
+  const wsOverall = XLSX.utils.json_to_sheet(overallDataRows);
+  wsOverall['!cols'] = [
+    { wch: 5 }, { wch: 16 }, { wch: 24 }, { wch: 26 }, { wch: 14 },
+    { wch: 32 }, { wch: 24 }, { wch: 10 }, { wch: 18 }, { wch: 20 },
+    { wch: 38 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 },
+    { wch: 20 }, { wch: 18 }
+  ];
+  XLSX.utils.book_append_sheet(wb, wsOverall, 'Overall Venue Entry');
+
+  // 2. Individual Event Sheets (Each attendee who chose the event is included)
+  const eventDefinitions = [
+    { name: 'Code Crusade', key: 'codeCrusadeSelected' as const, checkinKey: 'codeCrusadeCheckin' as const },
+    { name: 'Logic Arena', key: 'logicArenaSelected' as const, checkinKey: 'logicArenaCheckin' as const },
+    { name: 'UI-UX Studio', key: 'uiuxStudioSelected' as const, checkinKey: 'uiuxStudioCheckin' as const },
+    { name: 'Tech Tactics', key: 'techTacticsSelected' as const, checkinKey: 'techTacticsCheckin' as const },
+    { name: 'Pixel Pulse', key: 'pixelPulseSelected' as const, checkinKey: 'pixelPulseCheckin' as const },
+  ];
+
+  eventDefinitions.forEach(evDef => {
+    const eventParticipants = rows.filter(r => r[evDef.key] === 'YES');
+    const eventSheetData = eventParticipants.map((r, idx) => {
+      const isCheckedIn = Boolean(r[evDef.checkinKey] && r[evDef.checkinKey] !== 'NOT CHECKED IN');
+      return {
         '#': idx + 1,
         'Pass ID': r.passId,
         'Participant Name': r.name,
@@ -199,70 +281,22 @@ export function exportToExcel(
         'College': r.college,
         'Department': r.department,
         'Year': r.year,
-        'Overall Attendance': r.status,
-        'Overall Check-in Time': r.formattedTime,
-        'Events Interested In (Selected Events)': getInterestedEvents(r),
-        'Code Crusade Selected': r.codeCrusadeSelected || 'NO',
-        'Logic Arena Selected': r.logicArenaSelected || 'NO',
-        'UI/UX Studio Selected': r.uiuxStudioSelected || 'NO',
-        'Tech Tactics Selected': r.techTacticsSelected || 'NO',
-        'Pixel Pulse Selected': r.pixelPulseSelected || 'NO',
-        'Code Crusade Check-in': r.codeCrusadeCheckin || 'NOT CHECKED IN',
-        'Logic Arena Check-in': r.logicArenaCheckin || 'NOT CHECKED IN',
-        'UI/UX Studio Check-in': r.uiuxStudioCheckin || 'NOT CHECKED IN',
-        'Tech Tactics Check-in': r.techTacticsCheckin || 'NOT CHECKED IN',
-        'Pixel Pulse Check-in': r.pixelPulseCheckin || 'NOT CHECKED IN',
-        'Coordinator': r.coordinatorName
-      });
-    }
+        'Selected Event': evDef.name,
+        'Gate Entry Time': r.formattedTime,
+        'Event Attendance Status': isCheckedIn ? 'CHECKED IN' : 'NOT CHECKED IN',
+        'Event Check-in Time': r[evDef.checkinKey] || 'NOT CHECKED IN',
+        'Gate Coordinator': r.coordinatorName
+      };
+    });
+
+    const wsEvent = XLSX.utils.json_to_sheet(eventSheetData);
+    wsEvent['!cols'] = [
+      { wch: 5 }, { wch: 16 }, { wch: 24 }, { wch: 26 }, { wch: 14 },
+      { wch: 32 }, { wch: 24 }, { wch: 10 }, { wch: 20 }, { wch: 20 },
+      { wch: 24 }, { wch: 22 }, { wch: 18 }
+    ];
+    XLSX.utils.book_append_sheet(wb, wsEvent, evDef.name.substring(0, 31));
   });
-
-  const ws = XLSX.utils.json_to_sheet(dataRows);
-
-  // Set column widths
-  ws['!cols'] = eventInfo
-    ? [
-        { wch: 5 },
-        { wch: 16 },
-        { wch: 24 },
-        { wch: 26 },
-        { wch: 14 },
-        { wch: 30 },
-        { wch: 24 },
-        { wch: 10 },
-        { wch: 24 },
-        { wch: 24 },
-        { wch: 20 },
-        { wch: 18 }
-      ]
-    : [
-        { wch: 5 },
-        { wch: 16 },
-        { wch: 24 },
-        { wch: 26 },
-        { wch: 14 },
-        { wch: 30 },
-        { wch: 24 },
-        { wch: 10 },
-        { wch: 18 },
-        { wch: 20 },
-        { wch: 36 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 20 },
-        { wch: 18 }
-      ];
-
-  const wb = XLSX.utils.book_new();
-  const sheetName = eventInfo ? eventInfo.name.substring(0, 31) : 'Overall Attendance';
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
 
   const cleanFilename = filename.endsWith('.xlsx') ? filename : `${filename}.xlsx`;
   XLSX.writeFile(wb, cleanFilename);

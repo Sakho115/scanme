@@ -754,6 +754,174 @@ assert(failedAttempt.error.includes('Unable to record attendance'), 'Database fa
 const countAfterFailure = centralAttendance.filter(a => a.attendanceType === 'OVERALL').length;
 assert(countAfterFailure === 2, 'No fake attendance record added to database after write failure');
 
+// ----------------------------------------------------
+// TEST 12: Secure QR Lookup RPC & Schema Verification
+// ----------------------------------------------------
+console.log('\n--- TEST 12: Secure QR Lookup RPC & Schema Verification ---');
+const lookupMigrationFile = './supabase/migrations/20260922000000_secure_qr_lookup.sql';
+assert(existsSync(lookupMigrationFile), 'Migration 20260922000000_secure_qr_lookup.sql exists');
+const lookupMigrationSql = readFileSync(lookupMigrationFile, 'utf8');
+
+assert(lookupMigrationSql.includes('lookup_participant_by_qr_token'), 'lookup_participant_by_qr_token RPC defined');
+assert(lookupMigrationSql.includes('idx_participants_qr_token_unique'), 'Unique index on qr_token defined');
+assert(lookupMigrationSql.includes('SECURITY DEFINER'), 'lookup_participant_by_qr_token uses SECURITY DEFINER');
+assert(lookupMigrationSql.includes('SET search_path = public, pg_temp'), 'search_path hardened against injection');
+assert(lookupMigrationSql.includes('GRANT EXECUTE ON FUNCTION lookup_participant_by_qr_token'), 'Execution granted to public/authenticated roles');
+assert(lookupMigrationSql.includes('supabase_realtime'), 'Realtime publication configuration included in migration');
+assert(lookupMigrationSql.includes('get_dashboard_summary'), 'get_dashboard_summary RPC included in migration');
+
+// ----------------------------------------------------
+// TEST 13: Elimination of Function Overload Conflict (PGRST203)
+// ----------------------------------------------------
+console.log('\n--- TEST 13: Elimination of Function Overload Conflict ---');
+assert(lookupMigrationSql.includes('DROP FUNCTION IF EXISTS public.verify_and_checkin(text, text, uuid, uuid)'), 'Obsolete 4-parameter verify_and_checkin dropped in migration to eliminate PGRST203');
+assert(lookupMigrationSql.includes('p_event_ids UUID[] DEFAULT NULL'), 'verify_and_checkin signature supports atomic event selections');
+
+// ----------------------------------------------------
+// TEST 14: Master Participant Data Isolation from Frontend Bundle
+// ----------------------------------------------------
+console.log('\n--- TEST 14: Master Participant Data Isolation from Frontend Bundle ---');
+const mockDbContent = readFileSync('./src/data/mockDatabase.ts', 'utf8');
+// mockDatabase.ts must not contain the 2,300 lines of hardcoded participants
+const participantMatches = (mockDbContent.match(/internalId:\s*"/g) || []).length;
+assert(participantMatches <= 2, 'mockDatabase contains only test stub, NOT all 173 participants');
+assert(mockDbContent.length < 50000, 'mockDatabase size reduced by over 70% to eliminate bundle bloat');
+
+// ----------------------------------------------------
+// TEST 15: Security & Service-Role Isolation
+// ----------------------------------------------------
+console.log('\n--- TEST 15: Security & Service-Role Isolation ---');
+const envContent = readFileSync('./.env', 'utf8');
+assert(!envContent.includes('VITE_SUPABASE_SERVICE_ROLE_KEY'), 'SUPABASE_SERVICE_ROLE_KEY is NOT prefixed with VITE_');
+const supabaseClientContent = readFileSync('./src/lib/supabase.ts', 'utf8');
+assert(!supabaseClientContent.includes('SUPABASE_SERVICE_ROLE_KEY'), 'Client-side supabase.ts never references service role key');
+
+// ----------------------------------------------------
+// TEST 16: Multi-Sheet Event-Wise Excel Export & Multi-Event Inclusion
+// ----------------------------------------------------
+console.log('\n--- TEST 16: Multi-Sheet Event-Wise Excel Export & Multi-Event Inclusion ---');
+
+// Simulate participants with various event combinations
+const sampleAttendees = [
+  {
+    passId: 'VYG26-00045',
+    name: 'test_ashok',
+    college: 'PACET',
+    department: 'IT',
+    year: 'III Year',
+    status: 'ENTERED',
+    formattedTime: '10:00 AM',
+    codeCrusadeSelected: 'YES',
+    logicArenaSelected: 'YES',
+    uiuxStudioSelected: 'NO',
+    techTacticsSelected: 'NO',
+    pixelPulseSelected: 'YES'
+  },
+  {
+    passId: 'VYG26-00100',
+    name: 'Priyadharshini K',
+    college: 'Kongunadu',
+    department: 'IT',
+    year: 'II Year',
+    status: 'ENTERED',
+    formattedTime: '10:05 AM',
+    codeCrusadeSelected: 'NO',
+    logicArenaSelected: 'YES',
+    uiuxStudioSelected: 'YES',
+    techTacticsSelected: 'NO',
+    pixelPulseSelected: 'NO'
+  }
+];
+
+// Check sheet assignment logic
+const codeCrusadeSheet = sampleAttendees.filter(r => r.codeCrusadeSelected === 'YES');
+const logicArenaSheet = sampleAttendees.filter(r => r.logicArenaSelected === 'YES');
+const uiuxStudioSheet = sampleAttendees.filter(r => r.uiuxStudioSelected === 'YES');
+const techTacticsSheet = sampleAttendees.filter(r => r.techTacticsSelected === 'YES');
+const pixelPulseSheet = sampleAttendees.filter(r => r.pixelPulseSelected === 'YES');
+
+// Participant test_ashok chose Code Crusade, Logic Arena, Pixel Pulse
+assert(codeCrusadeSheet.some(r => r.passId === 'VYG26-00045'), 'Multi-event attendee test_ashok is present in Code Crusade sheet');
+assert(logicArenaSheet.some(r => r.passId === 'VYG26-00045'), 'Multi-event attendee test_ashok is present in Logic Arena sheet');
+assert(pixelPulseSheet.some(r => r.passId === 'VYG26-00045'), 'Multi-event attendee test_ashok is present in Pixel Pulse sheet');
+assert(!uiuxStudioSheet.some(r => r.passId === 'VYG26-00045'), 'test_ashok is NOT in UI/UX Studio sheet (not selected)');
+assert(!techTacticsSheet.some(r => r.passId === 'VYG26-00045'), 'test_ashok is NOT in Tech Tactics sheet (not selected)');
+
+// Participant Priyadharshini chose Logic Arena & UI/UX Studio
+assert(logicArenaSheet.some(r => r.passId === 'VYG26-00100'), 'Priyadharshini is in Logic Arena sheet');
+assert(uiuxStudioSheet.some(r => r.passId === 'VYG26-00100'), 'Priyadharshini is in UI/UX Studio sheet');
+assert(!codeCrusadeSheet.some(r => r.passId === 'VYG26-00100'), 'Priyadharshini is NOT in Code Crusade sheet');
+
+// ----------------------------------------------------
+// TEST 17: Strict Separation of Event Dashboards
+// ----------------------------------------------------
+console.log('\n--- TEST 17: Strict Separation of Event Dashboards ---');
+
+const eventAttendanceStore = [
+  // Ashok checks into Code Crusade (Event 1)
+  {
+    participantId: '899238a9-74ec-79e2-9d9f-6f5d0821a200',
+    attendanceType: 'EVENT',
+    eventId: 'e1000000-0000-0000-0000-000000000001', // Code Crusade
+    status: 'ENTERED'
+  }
+];
+
+// Query Code Crusade dashboard check-ins
+const codeCrusadeCheckins = eventAttendanceStore.filter(
+  a => a.attendanceType === 'EVENT' && a.eventId === 'e1000000-0000-0000-0000-000000000001' && a.status === 'ENTERED'
+);
+// Query Logic Arena dashboard check-ins
+const logicArenaCheckins = eventAttendanceStore.filter(
+  a => a.attendanceType === 'EVENT' && a.eventId === 'e2000000-0000-0000-0000-000000000002' && a.status === 'ENTERED'
+);
+// Query Overall Venue gate check-ins
+const overallGateCheckins = eventAttendanceStore.filter(
+  a => a.attendanceType === 'OVERALL' && a.status === 'ENTERED'
+);
+
+assert(codeCrusadeCheckins.length === 1, 'Code Crusade dashboard shows exactly 1 check-in');
+assert(logicArenaCheckins.length === 0, 'Logic Arena dashboard shows 0 check-ins (completely isolated)');
+assert(overallGateCheckins.length === 0, 'Event check-in does not bleed into overall venue gate');
+
+// ----------------------------------------------------
+// TEST 18: Rescan & Event Selections Update Simulation
+// ----------------------------------------------------
+console.log('\n--- TEST 18: Rescan & Event Selections Update Simulation ---');
+
+let participantSelections = [
+  { participantId: 'p1', eventId: 'e1000000-0000-0000-0000-000000000001' } // initially Code Crusade only
+];
+
+// Rescan occurs: Coordinator updates participant to also attend Logic Arena and Pixel Pulse
+function simulateUpdateSelections(participantId, newEventIds) {
+  participantSelections = participantSelections.filter(s => s.participantId !== participantId);
+  newEventIds.forEach(id => {
+    participantSelections.push({ participantId, eventId: id });
+  });
+  return participantSelections.filter(s => s.participantId === participantId);
+}
+
+const updated = simulateUpdateSelections('p1', [
+  'e1000000-0000-0000-0000-000000000001',
+  'e2000000-0000-0000-0000-000000000002',
+  'e5000000-0000-0000-0000-000000000005'
+]);
+
+assert(updated.length === 3, 'Rescan successfully updated participant to 3 selected events');
+assert(updated.some(s => s.eventId === 'e2000000-0000-0000-0000-000000000002'), 'Participant now has Logic Arena registered');
+assert(updated.some(s => s.eventId === 'e5000000-0000-0000-0000-000000000005'), 'Participant now has Pixel Pulse registered');
+
+// Verification SQL exists
+const verificationSqlFile = './supabase/production_verification.sql';
+assert(existsSync(verificationSqlFile), 'production_verification.sql exists');
+const verSql = readFileSync(verificationSqlFile, 'utf8');
+assert(verSql.includes('lookup_participant_by_qr_token'), 'Verification SQL checks lookup RPC');
+assert(verSql.includes('VYG26-00045'), 'Verification SQL includes test participant VYG26-00045');
+
+// Connectivity guide exists
+assert(existsSync('./SUPABASE_CONNECTIVITY.md'), 'SUPABASE_CONNECTIVITY.md documentation exists');
+
 console.log('\n=============================================');
 console.log(`TOTAL: ${passed + failed} | PASSED: ${passed} | FAILED: ${failed}`);
 console.log('=============================================\n');

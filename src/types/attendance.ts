@@ -122,6 +122,7 @@ export interface ClassificationFilters {
 
 export interface ClassificationRow {
   index: number;
+  participantId?: string;
   passId: string;
   name: string;
   email?: string;

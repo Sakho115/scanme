@@ -30,7 +30,7 @@ export const EventDashboardPage: React.FC = () => {
   const [stats, setStats] = useState<EventStats | null>(null);
   const [rows, setRows] = useState<ClassificationRow[]>([]);
   const [filters, setFilters] = useState<ClassificationFilters>({
-    status: 'ALL'
+    status: 'ENTERED'
   });
   const [isLoading, setIsLoading] = useState(true);
 
@@ -38,14 +38,14 @@ export const EventDashboardPage: React.FC = () => {
     return attendanceService.getFilterOptions();
   }, []);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (isBackground = false) => {
     if (!eventSlug) return;
     const ev = getEventBySlug(eventSlug);
     setEvent(ev);
 
     if (!ev) return;
 
-    setIsLoading(true);
+    if (!isBackground) setIsLoading(true);
     try {
       const [s, r] = await Promise.all([
         attendanceService.getEventStats(ev.slug),
@@ -59,28 +59,41 @@ export const EventDashboardPage: React.FC = () => {
     } catch (err) {
       console.error('Failed to load event dashboard data:', err);
     } finally {
-      setIsLoading(false);
+      if (!isBackground) setIsLoading(false);
     }
   }, [eventSlug, filters]);
 
   useEffect(() => {
     loadData();
     const unsubscribe = attendanceService.subscribeToAttendanceUpdates(() => {
-      loadData();
+      loadData(true);
     });
+
+    // 3-second polling fallback to guarantee multi-device sync on mobile
+    const pollTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadData(true);
+      }
+    }, 3000);
+
     return () => {
       unsubscribe();
+      clearInterval(pollTimer);
     };
   }, [loadData]);
 
-  // Window focus listener for fresh data when switching tabs/windows
+  // Window focus & tab visibility listener for instant fresh data
   useEffect(() => {
-    const handleFocus = () => {
-      loadData();
+    const handleRevalidate = () => {
+      if (document.visibilityState === 'visible') {
+        loadData(true);
+      }
     };
-    window.addEventListener('focus', handleFocus);
+    window.addEventListener('focus', handleRevalidate);
+    document.addEventListener('visibilitychange', handleRevalidate);
     return () => {
-      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('focus', handleRevalidate);
+      document.removeEventListener('visibilitychange', handleRevalidate);
     };
   }, [loadData]);
 
@@ -157,7 +170,7 @@ export const EventDashboardPage: React.FC = () => {
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
             <button
-              onClick={loadData}
+              onClick={() => loadData()}
               disabled={isLoading}
               className="touch-target p-2.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
               title="Refresh Data"

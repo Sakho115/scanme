@@ -308,21 +308,25 @@ export const AttendanceScannerPage: React.FC<AttendanceScannerPageProps> = ({ fo
   };
 
   const handleUpdateSelections = async (newEventIds: string[]) => {
-    if (!resultData?.participantId) return;
+    const pId = resultData?.participantId || resultData?.participant?.id;
+    if (!pId) return;
     const res = await attendanceService.updateEventSelections({
-      participantId: resultData.participantId,
+      participantId: pId,
       eventIds: newEventIds,
       coordinatorId: session?.id || null
     });
-    if (res.success && res.selectedEvents) {
-      setResultData(prev =>
-        prev
-          ? {
-              ...prev,
-              selectedEvents: res.selectedEvents
-            }
-          : null
-      );
+    if (res.success) {
+      attendanceService.broadcastAttendanceChange();
+      if (res.selectedEvents) {
+        setResultData(prev =>
+          prev
+            ? {
+                ...prev,
+                selectedEvents: res.selectedEvents
+              }
+            : null
+        );
+      }
     }
   };
 

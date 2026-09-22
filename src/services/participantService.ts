@@ -9,11 +9,34 @@ class ParticipantService {
   async findByQrToken(qrToken: string): Promise<Participant | null> {
     if (isSupabaseConfigured()) {
       try {
+        const clean = qrToken.trim();
+        // Fast path: use secure RPC lookup
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('lookup_participant_by_qr_token', {
+          p_qr_token: clean
+        });
+
+        if (!rpcErr && rpcData && rpcData.participant) {
+          const p = rpcData.participant;
+          return {
+            id: p.id,
+            internalId: p.internalId || p.id,
+            passId: p.passId,
+            qrToken: clean,
+            name: p.name,
+            email: p.email || '',
+            phone: p.phone || '',
+            college: p.college,
+            department: p.department,
+            year: p.year,
+            registrationStatus: p.registrationStatus as any
+          };
+        }
+
         const { data, error } = await supabase
           .from('participants')
-          .select('*')
-          .eq('qr_token', qrToken.trim().toLowerCase())
-          .single();
+          .select('id, internal_id, pass_id, qr_token, name, email, phone, college, department, year, reference, registration_status')
+          .or(`qr_token.ilike.${clean.toLowerCase()},pass_id.ilike.${clean}`)
+          .maybeSingle();
 
         if (data && !error) {
           return {

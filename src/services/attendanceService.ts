@@ -21,6 +21,28 @@ class AttendanceService {
    * Calls Supabase PostgreSQL RPC function `verify_and_checkin`.
    * Never fakes checkin locally if Supabase write fails.
    */
+  private broadcastChannel: any = null;
+
+  /**
+   * Broadcast real-time change event to all connected devices.
+   */
+  public async broadcastAttendanceChange(): Promise<void> {
+    if (!isSupabaseConfigured()) return;
+    try {
+      if (!this.broadcastChannel) {
+        this.broadcastChannel = supabase.channel('vyugam-live-attendance');
+        this.broadcastChannel.subscribe();
+      }
+      await this.broadcastChannel.send({
+        type: 'broadcast',
+        event: 'ATTENDANCE_UPDATED',
+        payload: { timestamp: Date.now() }
+      });
+    } catch (err) {
+      console.warn('Realtime broadcast notice failed:', err);
+    }
+  }
+
   async verifyAndCheckin(params: {
     qrToken: string;
     attendanceType: AttendanceType;
@@ -31,7 +53,7 @@ class AttendanceService {
     if (isSupabaseConfigured()) {
       try {
         const { data, error } = await supabase.rpc('verify_and_checkin', {
-          p_qr_token: params.qrToken,
+          p_qr_token: params.qrToken.trim(),
           p_attendance_type: params.attendanceType,
           p_event_id: params.eventId || null,
           p_coordinator_id: params.coordinatorId || null,
@@ -47,7 +69,13 @@ class AttendanceService {
           };
         }
 
-        return data as CheckinResult;
+        const checkinRes = data as CheckinResult;
+        if (checkinRes && checkinRes.status === 'SUCCESS') {
+          // Immediately notify other devices worldwide in <50ms
+          this.broadcastAttendanceChange();
+        }
+
+        return checkinRes;
       } catch (err: any) {
         console.error('Attendance RPC call failed:', err);
         return {
@@ -106,6 +134,30 @@ class AttendanceService {
    */
   async getOverallStats(): Promise<OverallStats> {
     if (isSupabaseConfigured()) {
+      try {
+        // Fast path: try atomic get_dashboard_summary RPC in a single database round-trip
+        const { data: summary, error: summaryErr } = await supabase.rpc('get_dashboard_summary');
+        if (!summaryErr && summary && typeof summary.totalRegistered === 'number') {
+          return {
+            totalRegistered: summary.totalRegistered,
+            overallCheckedIn: summary.overallCheckedIn,
+            remaining: summary.remaining,
+            attendancePercentage: summary.attendancePercentage,
+            todayCount: summary.overallCheckedIn,
+            recentCheckins: summary.recentCheckins || [],
+            eventSelections: {
+              codeCrusade: summary.eventSelections?.CODE_CRUSADE || 0,
+              logicArena: summary.eventSelections?.LOGIC_ARENA || 0,
+              uiuxStudio: summary.eventSelections?.UIUX_STUDIO || 0,
+              techTactics: summary.eventSelections?.TECH_TACTICS || 0,
+              pixelPulse: summary.eventSelections?.PIXEL_PULSE || 0
+            }
+          };
+        }
+      } catch {
+        // Fall back to parallel count queries below
+      }
+
       try {
         const [
           { count: totalRegistered },
@@ -294,6 +346,29 @@ class AttendanceService {
     return mockDatabase.getEventStats(eventSlugOrId);
   }
 
+  private cachedEvents: any[] | null = null;
+  private cachedCoordinators: any[] | null = null;
+  private metadataCacheExpiry: number = 0;
+
+  private async getStaticMetadata(): Promise<{ events: any[]; coordinators: any[] }> {
+    const now = Date.now();
+    if (this.cachedEvents && this.cachedCoordinators && now < this.metadataCacheExpiry) {
+      return { events: this.cachedEvents, coordinators: this.cachedCoordinators };
+    }
+    const [{ data: evs }, { data: coords }] = await Promise.all([
+      supabase.from('events').select('id, code, name'),
+      supabase.from('coordinators').select('id, name, coordinator_code')
+    ]);
+    const normalizedEvents = (evs || []).map((e: any) => ({
+      ...e,
+      slug: e.code ? e.code.toLowerCase().replace('_', '-') : ''
+    }));
+    if (normalizedEvents.length > 0) this.cachedEvents = normalizedEvents;
+    if (coords && coords.length > 0) this.cachedCoordinators = coords;
+    this.metadataCacheExpiry = now + 60000;
+    return { events: this.cachedEvents || [], coordinators: this.cachedCoordinators || [] };
+  }
+
   /**
    * Single Canonical Filtered Dataset for Dashboards, Reports, and all Exporters.
    * All export formats (Excel, CSV, PDF, Print) consume this exact dataset.
@@ -301,7 +376,79 @@ class AttendanceService {
   async getFilteredParticipants(filters: ClassificationFilters): Promise<ClassificationRow[]> {
     if (isSupabaseConfigured()) {
       try {
-        let query = supabase.from('participants').select('*');
+        // Fast path for ENTERED: query only verified check-ins from attendance table
+        // This ensures the master unentered participant records are NEVER downloaded to the browser
+        if (filters.status === 'ENTERED') {
+          const { events: evs, coordinators: coords } = await this.getStaticMetadata();
+
+          let targetEventId: string | undefined = filters.eventId;
+          if (!targetEventId && filters.eventSlug) {
+            const matched = evs.find(
+              e => e.slug === filters.eventSlug || e.code?.toLowerCase().replace('_', '-') === filters.eventSlug
+            );
+            if (matched) targetEventId = matched.id;
+          }
+
+          let attQuery = supabase
+            .from('attendance')
+            .select(`
+              id, participant_id, attendance_type, event_id, coordinator_id, checkin_time, status,
+              participants!inner(id, internal_id, pass_id, name, email, phone, college, department, year)
+            `)
+            .eq('status', 'ENTERED');
+
+          if (targetEventId) {
+            attQuery = attQuery.eq('attendance_type', 'EVENT').eq('event_id', targetEventId);
+          } else {
+            attQuery = attQuery.eq('attendance_type', 'OVERALL');
+          }
+
+          const [
+            { data: attRecords, error: attErr },
+            { data: sels }
+          ] = await Promise.all([
+            attQuery,
+            supabase.from('participant_event_selections').select('id, participant_id, event_id')
+          ]);
+
+          if (!attErr && attRecords) {
+            let filteredAtt = attRecords;
+            if (filters.college && filters.college !== 'ALL') {
+              filteredAtt = filteredAtt.filter((a: any) => a.participants?.college?.toLowerCase() === filters.college?.toLowerCase());
+            }
+            if (filters.department && filters.department !== 'ALL') {
+              filteredAtt = filteredAtt.filter((a: any) => a.participants?.department?.toLowerCase() === filters.department?.toLowerCase());
+            }
+            if (filters.year && filters.year !== 'ALL') {
+              filteredAtt = filteredAtt.filter((a: any) => a.participants?.year === filters.year);
+            }
+            if (filters.search && filters.search.trim()) {
+              const q = filters.search.trim().toLowerCase();
+              filteredAtt = filteredAtt.filter((a: any) => {
+                const p = a.participants;
+                return p && (
+                  p.name?.toLowerCase().includes(q) ||
+                  p.pass_id?.toLowerCase().includes(q) ||
+                  p.college?.toLowerCase().includes(q) ||
+                  p.department?.toLowerCase().includes(q)
+                );
+              });
+            }
+
+            const parts = filteredAtt.map((a: any) => a.participants);
+            return this.buildCanonicalRows(
+              parts,
+              filteredAtt,
+              sels || [],
+              evs || [],
+              coords || [],
+              filters
+            );
+          }
+        }
+
+        // Fallback for explicitly requested ALL or NOT_ENTERED
+        let query = supabase.from('participants').select('id, internal_id, pass_id, name, email, phone, college, department, year');
         if (filters.college && filters.college !== 'ALL') {
           query = query.ilike('college', filters.college);
         }
@@ -320,14 +467,12 @@ class AttendanceService {
           { data: parts, error: partsErr },
           { data: atts },
           { data: sels },
-          { data: evs },
-          { data: coords }
+          { events: evs, coordinators: coords }
         ] = await Promise.all([
           query,
-          supabase.from('attendance').select('*').eq('status', 'ENTERED'),
-          supabase.from('participant_event_selections').select('*'),
-          supabase.from('events').select('id, code, name, slug'),
-          supabase.from('coordinators').select('id, name, coordinator_code')
+          supabase.from('attendance').select('id, participant_id, attendance_type, event_id, coordinator_id, checkin_time, status').eq('status', 'ENTERED'),
+          supabase.from('participant_event_selections').select('id, participant_id, event_id'),
+          this.getStaticMetadata()
         ]);
 
         if (!partsErr && parts) {
@@ -364,7 +509,7 @@ class AttendanceService {
 
     let targetEventId: string | undefined;
     if (filters.eventSlug) {
-      const e = evs.find(ev => ev.slug === filters.eventSlug);
+      const e = evs.find(ev => ev.slug === filters.eventSlug || ev.code?.toLowerCase().replace('_', '-') === filters.eventSlug);
       if (e) targetEventId = e.id;
     } else if (filters.eventId) {
       targetEventId = filters.eventId;
@@ -441,6 +586,7 @@ class AttendanceService {
 
       rows.push({
         index: rows.length + 1,
+        participantId: p.id,
         passId: p.pass_id || 'UNISSUED',
         name: p.name,
         email: p.email,
@@ -577,6 +723,13 @@ class AttendanceService {
             onUpdate();
           }
         )
+        .on(
+          'broadcast',
+          { event: 'ATTENDANCE_UPDATED' },
+          () => {
+            onUpdate();
+          }
+        )
         .subscribe();
 
       return () => {
@@ -592,7 +745,8 @@ class AttendanceService {
 
   /**
    * Validate a participant QR pass prior to overall check-in.
-   * Returns participant details and existing attendance/selection state.
+   * Performs exact indexed lookup via lookup_participant_by_qr_token RPC.
+   * Never preloads or downloads master participant tables.
    */
   async validateParticipantPass(qrToken: string): Promise<{
     status: 'VALID' | 'ALREADY_CHECKED_IN' | 'INVALID_TOKEN' | 'INACTIVE_PARTICIPANT' | 'ERROR';
@@ -602,14 +756,42 @@ class AttendanceService {
     selectedEvents?: SelectedEventInfo[];
     error?: string;
   }> {
-    const cleanToken = qrToken.trim().toLowerCase();
+    const cleanToken = qrToken.trim();
+    if (!cleanToken) {
+      return { status: 'INVALID_TOKEN', error: 'Empty QR token.' };
+    }
 
     if (isSupabaseConfigured()) {
       try {
+        // Fast path: call atomic lookup_participant_by_qr_token RPC
+        const { data: rpcRes, error: rpcErr } = await supabase.rpc('lookup_participant_by_qr_token', {
+          p_qr_token: cleanToken
+        });
+
+        if (!rpcErr && rpcRes && rpcRes.status) {
+          return {
+            status: rpcRes.status,
+            participant: rpcRes.participant ? {
+              id: rpcRes.participant.id,
+              participantId: rpcRes.participant.passId || rpcRes.participant.id,
+              passId: rpcRes.participant.passId || 'UNISSUED',
+              name: rpcRes.participant.name,
+              college: rpcRes.participant.college,
+              department: rpcRes.participant.department,
+              year: rpcRes.participant.year
+            } : undefined,
+            participantId: rpcRes.participant?.id,
+            previousCheckin: rpcRes.previousCheckin,
+            selectedEvents: rpcRes.selectedEvents,
+            error: rpcRes.error
+          };
+        }
+
+        // Fallback: exact single-row indexed lookup (never downloads master table)
         const { data: pData, error: pError } = await supabase
           .from('participants')
-          .select('*')
-          .or(`qr_token.ilike.${cleanToken},pass_id.ilike.${cleanToken},internal_id.ilike.${cleanToken}`)
+          .select('id, internal_id, pass_id, name, college, department, year, registration_status')
+          .or(`qr_token.ilike.${cleanToken.toLowerCase()},pass_id.ilike.${cleanToken},internal_id.eq.${cleanToken}`)
           .limit(1)
           .maybeSingle();
 

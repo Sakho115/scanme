@@ -27,9 +27,15 @@ export const DuplicateState: React.FC<DuplicateStateProps> = ({
   const formattedTime = previousCheckin?.time ? formatTime(previousCheckin.time) : 'Earlier today';
   const coordinator = previousCheckin?.coordinatorName || previousCheckin?.coordinatorId || 'Desk Coordinator';
 
+  const getInitialIds = (events: SelectedEventInfo[]) => {
+    return VYUGAM_EVENTS
+      .filter(e => events.some(s => s.id === e.id || s.code === e.code))
+      .map(e => e.id);
+  };
+
   const [isEditing, setIsEditing] = useState(false);
   const [editingIds, setEditingIds] = useState<string[]>(() =>
-    selectedEvents.map(s => s.id)
+    getInitialIds(selectedEvents)
   );
   const [isSaving, setIsSaving] = useState(false);
 
@@ -112,7 +118,7 @@ export const DuplicateState: React.FC<DuplicateStateProps> = ({
             {canUpdateSelections && !isEditing && (
               <button
                 onClick={() => {
-                  setEditingIds(selectedEvents.map(s => s.id));
+                  setEditingIds(getInitialIds(selectedEvents));
                   setIsEditing(true);
                 }}
                 className="text-[11px] font-bold text-blue-700 hover:text-blue-900 underline flex items-center gap-1"
@@ -179,7 +185,7 @@ export const DuplicateState: React.FC<DuplicateStateProps> = ({
                 </button>
                 <button
                   onClick={() => {
-                    setEditingIds(selectedEvents.map(s => s.id));
+                    setEditingIds(getInitialIds(selectedEvents));
                     setIsEditing(false);
                   }}
                   disabled={isSaving}

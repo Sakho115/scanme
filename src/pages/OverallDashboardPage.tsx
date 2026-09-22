@@ -8,6 +8,7 @@ import { attendanceService } from '../services/attendanceService';
 import { authService } from '../services/authService';
 import { OverallStats, ClassificationFilters, ClassificationRow } from '../types/attendance';
 import { exportToExcel, exportToPDF, exportToCSV } from '../utils/export';
+import { EditEventSelectionsModal } from '../components/ParticipantCard/EditEventSelectionsModal';
 import {
   Building2,
   Users,
@@ -18,7 +19,8 @@ import {
   Search,
   Sparkles,
   FileSpreadsheet,
-  FileText
+  FileText,
+  Edit3
 } from 'lucide-react';
 
 
@@ -30,16 +32,31 @@ export const OverallDashboardPage: React.FC = () => {
   const [rows, setRows] = useState<ClassificationRow[]>([]);
   const [filters, setFilters] = useState<ClassificationFilters>({
     attendanceType: 'OVERALL',
-    status: 'ALL'
+    status: 'ENTERED'
   });
   const [isLoading, setIsLoading] = useState(true);
+  const [editingRow, setEditingRow] = useState<ClassificationRow | null>(null);
+
+  const handleSaveEditedSelections = async (newEventIds: string[]) => {
+    if (!editingRow) return;
+    const pId = editingRow.participantId || editingRow.passId;
+    const res = await attendanceService.updateEventSelections({
+      participantId: pId,
+      eventIds: newEventIds,
+      coordinatorId: session?.id || null
+    });
+    if (res.success) {
+      attendanceService.broadcastAttendanceChange();
+      await loadData(true);
+    }
+  };
 
   const filterOptions = useMemo(() => {
     return attendanceService.getFilterOptions();
   }, []);
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
+  const loadData = useCallback(async (isBackground = false) => {
+    if (!isBackground) setIsLoading(true);
     try {
       const [s, r] = await Promise.all([
         attendanceService.getOverallStats(),
@@ -53,28 +70,41 @@ export const OverallDashboardPage: React.FC = () => {
     } catch (err) {
       console.error('Failed to load overall dashboard data:', err);
     } finally {
-      setIsLoading(false);
+      if (!isBackground) setIsLoading(false);
     }
   }, [filters]);
 
   useEffect(() => {
     loadData();
     const unsubscribe = attendanceService.subscribeToAttendanceUpdates(() => {
-      loadData();
+      loadData(true);
     });
+
+    // 3-second polling fallback to guarantee multi-device sync on mobile
+    const pollTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadData(true);
+      }
+    }, 3000);
+
     return () => {
       unsubscribe();
+      clearInterval(pollTimer);
     };
   }, [loadData]);
 
-  // Window focus listener for fresh data when switching tabs/windows
+  // Window focus & tab visibility listener for instant fresh data
   useEffect(() => {
-    const handleFocus = () => {
-      loadData();
+    const handleRevalidate = () => {
+      if (document.visibilityState === 'visible') {
+        loadData(true);
+      }
     };
-    window.addEventListener('focus', handleFocus);
+    window.addEventListener('focus', handleRevalidate);
+    document.addEventListener('visibilitychange', handleRevalidate);
     return () => {
-      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('focus', handleRevalidate);
+      document.removeEventListener('visibilitychange', handleRevalidate);
     };
   }, [loadData]);
 
@@ -170,7 +200,7 @@ export const OverallDashboardPage: React.FC = () => {
             </button>
 
             <button
-              onClick={loadData}
+              onClick={() => loadData()}
               disabled={isLoading}
               className="touch-target p-2.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
               title="Refresh Data"
@@ -350,18 +380,19 @@ export const OverallDashboardPage: React.FC = () => {
                   <th className="py-3 px-3 text-right">Check-in Time</th>
                   <th className="py-3 px-3 text-center">Coordinator</th>
                   <th className="py-3 px-3.5 text-center">Status</th>
+                  <th className="py-3 px-3 text-center">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
                 {isLoading ? (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-slate-400">
+                    <td colSpan={11} className="py-12 text-center text-slate-400">
                       Loading attendance records...
                     </td>
                   </tr>
                 ) : rows.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-slate-400">
+                    <td colSpan={11} className="py-12 text-center text-slate-400">
                       <div className="flex flex-col items-center justify-center">
                         <Search className="w-8 h-8 text-slate-300 mb-2" />
                         <p className="font-semibold text-slate-600">No participants found.</p>
@@ -445,6 +476,16 @@ export const OverallDashboardPage: React.FC = () => {
                           </span>
                         )}
                       </td>
+                      <td className="py-3 px-3 text-center whitespace-nowrap">
+                        <button
+                          onClick={() => setEditingRow(row)}
+                          className="touch-target px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[11px] rounded-lg border border-blue-200 flex items-center gap-1 mx-auto transition-all active:scale-95"
+                          title="Edit Event Participation"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          <span>Edit Events</span>
+                        </button>
+                      </td>
                     </tr>
                   ))
                 )}
@@ -452,6 +493,30 @@ export const OverallDashboardPage: React.FC = () => {
             </table>
           </div>
         </div>
+
+        {/* Edit Event Selections Modal */}
+        {editingRow && (
+          <EditEventSelectionsModal
+            isOpen={Boolean(editingRow)}
+            onClose={() => setEditingRow(null)}
+            participant={{
+              id: editingRow.participantId,
+              passId: editingRow.passId,
+              name: editingRow.name,
+              college: editingRow.college,
+              department: editingRow.department,
+              year: editingRow.year
+            }}
+            currentSelectedEvents={{
+              codeCrusade: editingRow.codeCrusadeSelected === 'YES',
+              logicArena: editingRow.logicArenaSelected === 'YES',
+              uiuxStudio: editingRow.uiuxStudioSelected === 'YES',
+              techTactics: editingRow.techTacticsSelected === 'YES',
+              pixelPulse: editingRow.pixelPulseSelected === 'YES'
+            }}
+            onSave={handleSaveEditedSelections}
+          />
+        )}
       </div>
     </AppShell>
   );
