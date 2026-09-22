@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, CheckSquare, Save, Loader2, User, School, Sparkles } from 'lucide-react';
-import { VYUGAM_EVENTS, VyugamEvent } from '../../types/event';
+import { VYUGAM_EVENTS } from '../../types/event';
 
 interface EditEventSelectionsModalProps {
   isOpen: boolean;
