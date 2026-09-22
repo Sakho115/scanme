@@ -149,8 +149,8 @@ export const FilterToolbar: React.FC<FilterToolbarProps> = ({
               className="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded-lg text-slate-800 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="ALL">All Status</option>
-              <option value="ENTERED">Checked In</option>
-              <option value="NOT_ENTERED">Not Entered</option>
+              <option value="ENTERED">Entered Participants</option>
+              <option value="NOT_ENTERED">Not Entered Participants</option>
             </select>
           </div>
         )}

@@ -2436,7 +2436,6 @@ export const SEED_COORDINATORS: Coordinator[] = [
 ];
 
 const STORAGE_KEY_ATTENDANCE = 'vyugam_supabase_attendance_mock_v2';
-const STORAGE_KEY_PARTICIPANTS = 'vyugam_supabase_participants_mock_v2';
 const STORAGE_KEY_EVENT_SELECTIONS = 'vyugam_supabase_event_selections_mock_v2';
 
 class MockRelationalDatabase {
@@ -2451,32 +2450,23 @@ class MockRelationalDatabase {
   }
 
   private load(): void {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      try {
-        const storedParts = localStorage.getItem(STORAGE_KEY_PARTICIPANTS);
-        this.participants = storedParts ? JSON.parse(storedParts) : [...SEED_PARTICIPANTS];
-
-        const storedAtt = localStorage.getItem(STORAGE_KEY_ATTENDANCE);
-        this.attendance = storedAtt ? JSON.parse(storedAtt) : [];
-
-        const storedSels = localStorage.getItem(STORAGE_KEY_EVENT_SELECTIONS);
-        this.eventSelections = storedSels ? JSON.parse(storedSels) : [];
-        return;
-      } catch {
-        // fall back to seeds
-      }
-    }
+    // Single source of truth is Supabase PostgreSQL.
+    // Local state is in-memory only for offline tests/demo and never persists as authoritative cross-device state.
     this.participants = [...SEED_PARTICIPANTS];
     this.attendance = [];
     this.eventSelections = [];
+
+    // Clean up any legacy localStorage keys that may cause stale device mismatches
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        localStorage.removeItem(STORAGE_KEY_ATTENDANCE);
+        localStorage.removeItem(STORAGE_KEY_EVENT_SELECTIONS);
+      } catch {}
+    }
   }
 
   private save(): void {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      localStorage.setItem(STORAGE_KEY_ATTENDANCE, JSON.stringify(this.attendance));
-      localStorage.setItem(STORAGE_KEY_PARTICIPANTS, JSON.stringify(this.participants));
-      localStorage.setItem(STORAGE_KEY_EVENT_SELECTIONS, JSON.stringify(this.eventSelections));
-    }
+    // Do NOT write attendance to localStorage. Supabase PostgreSQL is the single source of truth.
   }
 
   // ------------------------------------------------------------
@@ -2925,35 +2915,40 @@ class MockRelationalDatabase {
     const rows: ClassificationRow[] = [];
 
     dataset.forEach(p => {
-      let matchingAttendance: AttendanceRecord | undefined;
+      // Overall attendance: strictly attendanceType = 'OVERALL' AND status = 'ENTERED'
+      const overallAtt = this.attendance.find(
+        a => a.participantId === p.id && a.attendanceType === 'OVERALL' && a.status === 'ENTERED'
+      );
 
-      if (filters.attendanceType === 'OVERALL') {
-        matchingAttendance = this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'OVERALL');
-      } else if (targetEventId) {
-        matchingAttendance = this.attendance.find(
-          a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === targetEventId
-        );
-      } else if (filters.attendanceType === 'EVENT') {
-        matchingAttendance = this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT');
-      } else {
-        matchingAttendance = this.attendance.find(a => a.participantId === p.id);
-      }
-
-      // Check status filter
-      if (filters.status === 'ENTERED' && !matchingAttendance) return;
-      if (filters.status === 'NOT_ENTERED' && matchingAttendance) return;
-
-      // Check coordinator filter
-      if (filters.coordinatorId && filters.coordinatorId !== 'ALL') {
-        if (!matchingAttendance || matchingAttendance.coordinatorId !== filters.coordinatorId) return;
-      }
-
-      const coord = matchingAttendance?.coordinatorId
-        ? this.coordinators.find(c => c.id === matchingAttendance!.coordinatorId)
+      // Event attendance: strictly attendanceType = 'EVENT' AND eventId = targetEventId AND status = 'ENTERED'
+      const targetEventAtt = targetEventId
+        ? this.attendance.find(
+            a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === targetEventId && a.status === 'ENTERED'
+          )
         : undefined;
 
-      const ev = matchingAttendance?.eventId
-        ? this.events.find(e => e.id === matchingAttendance!.eventId)
+      // Authoritative definition of ENTERED
+      const isEntered = targetEventId
+        ? Boolean(targetEventAtt)
+        : Boolean(overallAtt);
+
+      // Status filtering:
+      // When user chooses "Entered Participants", only entered participants are included.
+      if (filters.status === 'ENTERED' && !isEntered) return;
+      if (filters.status === 'NOT_ENTERED' && isEntered) return;
+
+      // Check coordinator filter
+      const relevantAtt = targetEventId ? targetEventAtt : overallAtt;
+      if (filters.coordinatorId && filters.coordinatorId !== 'ALL') {
+        if (!relevantAtt || relevantAtt.coordinatorId !== filters.coordinatorId) return;
+      }
+
+      const coord = relevantAtt?.coordinatorId
+        ? this.coordinators.find(c => c.id === relevantAtt.coordinatorId)
+        : undefined;
+
+      const ev = relevantAtt?.eventId
+        ? this.events.find(e => e.id === relevantAtt.eventId)
         : undefined;
 
       // Selections
@@ -2964,11 +2959,11 @@ class MockRelationalDatabase {
       const hasPP = pixelPulseEv && this.eventSelections.some(s => s.participantId === p.id && s.eventId === pixelPulseEv.id);
 
       // Event Check-ins
-      const ccAtt = codeCrusadeEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === codeCrusadeEv.id) : undefined;
-      const laAtt = logicArenaEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === logicArenaEv.id) : undefined;
-      const uiAtt = uiuxStudioEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === uiuxStudioEv.id) : undefined;
-      const ttAtt = techTacticsEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === techTacticsEv.id) : undefined;
-      const ppAtt = pixelPulseEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === pixelPulseEv.id) : undefined;
+      const ccAtt = codeCrusadeEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === codeCrusadeEv.id && a.status === 'ENTERED') : undefined;
+      const laAtt = logicArenaEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === logicArenaEv.id && a.status === 'ENTERED') : undefined;
+      const uiAtt = uiuxStudioEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === uiuxStudioEv.id && a.status === 'ENTERED') : undefined;
+      const ttAtt = techTacticsEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === techTacticsEv.id && a.status === 'ENTERED') : undefined;
+      const ppAtt = pixelPulseEv ? this.attendance.find(a => a.participantId === p.id && a.attendanceType === 'EVENT' && a.eventId === pixelPulseEv.id && a.status === 'ENTERED') : undefined;
 
       rows.push({
         index: rows.length + 1,
@@ -2979,12 +2974,12 @@ class MockRelationalDatabase {
         college: p.college,
         department: p.department,
         year: p.year,
-        checkinTime: matchingAttendance?.checkinTime || '',
-        formattedTime: matchingAttendance?.checkinTime ? formatTime(matchingAttendance.checkinTime) : 'Not Entered',
-        coordinatorName: coord ? coord.name : matchingAttendance ? 'Desk' : '-',
-        status: matchingAttendance ? 'ENTERED' : 'NOT ENTERED',
-        eventName: ev ? ev.name : matchingAttendance?.attendanceType === 'OVERALL' ? 'Overall Entry' : '-',
-        attendanceType: matchingAttendance?.attendanceType,
+        checkinTime: relevantAtt?.checkinTime || '',
+        formattedTime: relevantAtt?.checkinTime ? formatTime(relevantAtt.checkinTime) : 'Not Entered',
+        coordinatorName: coord ? coord.name : relevantAtt ? 'Desk' : '-',
+        status: isEntered ? 'ENTERED' : 'NOT ENTERED',
+        eventName: ev ? ev.name : targetEventId ? 'Event Entry' : 'Overall Entry',
+        attendanceType: relevantAtt?.attendanceType || (targetEventId ? 'EVENT' : 'OVERALL'),
 
         codeCrusadeSelected: hasCC ? 'YES' : 'NO',
         logicArenaSelected: hasLA ? 'YES' : 'NO',

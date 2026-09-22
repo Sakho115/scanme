@@ -54,6 +54,23 @@ export const ReportsPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
+    const unsubscribe = attendanceService.subscribeToAttendanceUpdates(() => {
+      loadData();
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [loadData]);
+
+  // Window focus listener for fresh data when switching tabs/windows
+  useEffect(() => {
+    const handleFocus = () => {
+      loadData();
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [loadData]);
 
   const exportMetadata = {

@@ -49,6 +49,50 @@ class ParticipantService {
     department?: string;
     year?: string;
   }): Promise<Participant[]> {
+    if (isSupabaseConfigured()) {
+      try {
+        let query = supabase.from('participants').select('*');
+
+        if (filters?.college && filters.college !== 'ALL') {
+          query = query.ilike('college', filters.college);
+        }
+
+        if (filters?.department && filters.department !== 'ALL') {
+          query = query.ilike('department', filters.department);
+        }
+
+        if (filters?.year && filters.year !== 'ALL') {
+          query = query.ilike('year', filters.year);
+        }
+
+        if (filters?.search && filters.search.trim()) {
+          const q = filters.search.trim();
+          query = query.or(`name.ilike.%${q}%,pass_id.ilike.%${q}%,qr_token.ilike.%${q}%,college.ilike.%${q}%,department.ilike.%${q}%`);
+        }
+
+        const { data, error } = await query.order('name', { ascending: true });
+
+        if (!error && data) {
+          return data.map((p: any) => ({
+            id: p.id,
+            internalId: p.internal_id,
+            passId: p.pass_id,
+            qrToken: p.qr_token,
+            name: p.name,
+            email: p.email,
+            phone: p.phone,
+            college: p.college,
+            department: p.department,
+            year: p.year,
+            reference: p.reference,
+            registrationStatus: p.registration_status as any
+          }));
+        }
+      } catch (err) {
+        console.error('Failed to fetch participants from Supabase:', err);
+      }
+    }
+
     let list = mockDatabase.getParticipants();
 
     if (filters?.search && filters.search.trim()) {

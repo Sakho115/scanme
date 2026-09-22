@@ -63,6 +63,23 @@ export const MainDashboardPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
+    const unsubscribe = attendanceService.subscribeToAttendanceUpdates(() => {
+      loadData();
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [loadData]);
+
+  // Window focus listener for fresh data when switching tabs/windows
+  useEffect(() => {
+    const handleFocus = () => {
+      loadData();
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [loadData]);
 
   const isCoordinatorRestricted = session?.role === 'EVENT_COORDINATOR';
@@ -74,39 +91,51 @@ export const MainDashboardPage: React.FC = () => {
   };
 
   const handleExportEvent = async (event: VyugamEvent, type: 'excel' | 'pdf') => {
-    const rows = await attendanceService.getClassificationRows({
+    const rows = await attendanceService.getFilteredParticipants({
       eventSlug: event.slug,
+      attendanceType: 'EVENT',
       status: 'ENTERED'
     });
 
     const meta = {
-      title: `${event.name.toUpperCase()} ATTENDANCE`,
-      subtitle: `Official Event Attendance Log`
+      title: `${event.name.toUpperCase()} ATTENDANCE (ENTERED ONLY)`,
+      subtitle: `Official Event Attendance Log`,
+      scope: 'EVENT' as const,
+      eventSlug: event.slug,
+      eventName: event.name,
+      filters: {
+        Status: 'ENTERED'
+      }
     };
 
     if (type === 'excel') {
-      exportToExcel(rows, `${event.slug}_attendance.xlsx`, meta);
+      exportToExcel(rows, `${event.slug}_entered_attendance.xlsx`, meta);
     } else {
-      exportToPDF(rows, `${event.slug}_attendance.pdf`, meta);
+      exportToPDF(rows, `${event.slug}_entered_attendance.pdf`, meta);
     }
   };
 
-  const handleExportOverall = async (type: 'excel' | 'pdf') => {
-    const rows = await attendanceService.getClassificationRows({
+  const handleExportOverall = async (type: 'excel' | 'pdf', status: 'ENTERED' | 'ALL' = 'ENTERED') => {
+    const rows = await attendanceService.getFilteredParticipants({
       attendanceType: 'OVERALL',
-      status: 'ALL'
+      status
     });
 
     const meta = {
-      title: 'OVERALL VENUE ATTENDANCE REPORT',
+      title: status === 'ENTERED' ? 'OVERALL VENUE ATTENDANCE REPORT (ENTERED ONLY)' : 'OVERALL VENUE ATTENDANCE REPORT',
       subtitle: 'Official Venue Gate & Event Participation Log',
-      scope: 'OVERALL' as const
+      scope: 'OVERALL' as const,
+      filters: {
+        Status: status
+      }
     };
 
+    const filename = status === 'ENTERED' ? 'vyugam_overall_entered_attendance' : 'vyugam_overall_attendance';
+
     if (type === 'excel') {
-      exportToExcel(rows, 'vyugam_overall_attendance.xlsx', meta);
+      exportToExcel(rows, `${filename}.xlsx`, meta);
     } else {
-      exportToPDF(rows, 'vyugam_overall_attendance.pdf', meta);
+      exportToPDF(rows, `${filename}.pdf`, meta);
     }
   };
 

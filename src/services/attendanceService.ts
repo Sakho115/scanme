@@ -18,7 +18,8 @@ import { ParticipantPassInfo } from '../types/participant';
 class AttendanceService {
   /**
    * Atomic verification and check-in operation.
-   * Calls Supabase PostgreSQL RPC function `verify_and_checkin` or falls back to mockDatabase.
+   * Calls Supabase PostgreSQL RPC function `verify_and_checkin`.
+   * Never fakes checkin locally if Supabase write fails.
    */
   async verifyAndCheckin(params: {
     qrToken: string;
@@ -46,16 +47,18 @@ class AttendanceService {
           };
         }
 
-        // Trigger background sync to keep in-memory / local storage cache fresh
-        this.syncLiveStateFromSupabase().catch(() => {});
-
         return data as CheckinResult;
-      } catch (err) {
+      } catch (err: any) {
         console.error('Attendance RPC call failed:', err);
+        return {
+          status: 'ERROR',
+          success: false,
+          error: 'Unable to record attendance. Please check the connection and try again.'
+        };
       }
     }
 
-    // Fallback to local relational mock database
+    // Fallback to local relational mock database ONLY for offline/testing/demo mode
     return mockDatabase.verifyAndCheckin(params);
   }
 
@@ -90,7 +93,7 @@ class AttendanceService {
         return {
           status: 'ERROR',
           success: false,
-          error: err.message || 'Network error'
+          error: 'Unable to update event selections. Please check the connection and try again.'
         };
       }
     }
@@ -99,7 +102,7 @@ class AttendanceService {
   }
 
   /**
-   * Fetch Overall Attendance statistics.
+   * Fetch Overall Attendance statistics from Supabase (Single Source of Truth).
    */
   async getOverallStats(): Promise<OverallStats> {
     if (isSupabaseConfigured()) {
@@ -112,7 +115,11 @@ class AttendanceService {
           { data: selectionsData }
         ] = await Promise.all([
           supabase.from('participants').select('*', { count: 'exact', head: true }),
-          supabase.from('attendance').select('*', { count: 'exact', head: true }).eq('attendance_type', 'OVERALL'),
+          supabase
+            .from('attendance')
+            .select('*', { count: 'exact', head: true })
+            .eq('attendance_type', 'OVERALL')
+            .eq('status', 'ENTERED'),
           supabase
             .from('attendance')
             .select(`
@@ -121,6 +128,7 @@ class AttendanceService {
               coordinators (name)
             `)
             .eq('attendance_type', 'OVERALL')
+            .eq('status', 'ENTERED')
             .order('checkin_time', { ascending: false })
             .limit(10),
           supabase.from('events').select('id, code'),
@@ -185,7 +193,7 @@ class AttendanceService {
   }
 
   /**
-   * Fetch Event Attendance statistics for one of the 5 events.
+   * Fetch Event Attendance statistics for one of the 5 events from Supabase.
    */
   async getEventStats(eventSlugOrId: string): Promise<EventStats | null> {
     if (isSupabaseConfigured()) {
@@ -206,12 +214,17 @@ class AttendanceService {
             { data: recent }
           ] = await Promise.all([
             supabase.from('participants').select('*', { count: 'exact', head: true }),
-            supabase.from('attendance').select('*', { count: 'exact', head: true }).eq('attendance_type', 'OVERALL'),
+            supabase
+              .from('attendance')
+              .select('*', { count: 'exact', head: true })
+              .eq('attendance_type', 'OVERALL')
+              .eq('status', 'ENTERED'),
             supabase
               .from('attendance')
               .select('*', { count: 'exact', head: true })
               .eq('attendance_type', 'EVENT')
-              .eq('event_id', eventData.id),
+              .eq('event_id', eventData.id)
+              .eq('status', 'ENTERED'),
             supabase
               .from('participant_event_selections')
               .select('*', { count: 'exact', head: true })
@@ -225,6 +238,7 @@ class AttendanceService {
               `)
               .eq('attendance_type', 'EVENT')
               .eq('event_id', eventData.id)
+              .eq('status', 'ENTERED')
               .order('checkin_time', { ascending: false })
               .limit(10)
           ]);
@@ -281,90 +295,299 @@ class AttendanceService {
   }
 
   /**
-   * Synchronize live state from Supabase into the relational cache.
+   * Single Canonical Filtered Dataset for Dashboards, Reports, and all Exporters.
+   * All export formats (Excel, CSV, PDF, Print) consume this exact dataset.
    */
-  async syncLiveStateFromSupabase(): Promise<void> {
-    if (!isSupabaseConfigured()) return;
-    try {
-      const [
-        { data: parts },
-        { data: atts },
-        { data: sels }
-      ] = await Promise.all([
-        supabase.from('participants').select('*'),
-        supabase.from('attendance').select('*'),
-        supabase.from('participant_event_selections').select('*')
-      ]);
+  async getFilteredParticipants(filters: ClassificationFilters): Promise<ClassificationRow[]> {
+    if (isSupabaseConfigured()) {
+      try {
+        let query = supabase.from('participants').select('*');
+        if (filters.college && filters.college !== 'ALL') {
+          query = query.ilike('college', filters.college);
+        }
+        if (filters.department && filters.department !== 'ALL') {
+          query = query.ilike('department', filters.department);
+        }
+        if (filters.year && filters.year !== 'ALL') {
+          query = query.ilike('year', filters.year);
+        }
+        if (filters.search && filters.search.trim()) {
+          const q = filters.search.trim();
+          query = query.or(`name.ilike.%${q}%,pass_id.ilike.%${q}%,qr_token.ilike.%${q}%,college.ilike.%${q}%,department.ilike.%${q}%`);
+        }
 
-      const mappedParticipants = (parts && parts.length > 0)
-        ? parts.map((p: any) => ({
-            id: p.id,
-            internalId: p.internal_id,
-            name: p.name,
-            qrToken: p.qr_token,
-            college: p.college,
-            department: p.department,
-            year: p.year,
-            registrationStatus: p.registration_status,
-            passId: p.pass_id,
-            email: p.email,
-            phone: p.phone,
-            reference: p.reference
-          }))
+        const [
+          { data: parts, error: partsErr },
+          { data: atts },
+          { data: sels },
+          { data: evs },
+          { data: coords }
+        ] = await Promise.all([
+          query,
+          supabase.from('attendance').select('*').eq('status', 'ENTERED'),
+          supabase.from('participant_event_selections').select('*'),
+          supabase.from('events').select('id, code, name, slug'),
+          supabase.from('coordinators').select('id, name, coordinator_code')
+        ]);
+
+        if (!partsErr && parts) {
+          return this.buildCanonicalRows(
+            parts,
+            atts || [],
+            sels || [],
+            evs || [],
+            coords || [],
+            filters
+          );
+        }
+      } catch (err) {
+        console.error('getFilteredParticipants from Supabase failed:', err);
+      }
+    }
+
+    return mockDatabase.getClassificationRows(filters);
+  }
+
+  private buildCanonicalRows(
+    parts: any[],
+    atts: any[],
+    sels: any[],
+    evs: any[],
+    coords: any[],
+    filters: ClassificationFilters
+  ): ClassificationRow[] {
+    const codeCrusadeEv = evs.find(e => e.code === 'CODE_CRUSADE');
+    const logicArenaEv = evs.find(e => e.code === 'LOGIC_ARENA');
+    const uiuxStudioEv = evs.find(e => e.code === 'UIUX_STUDIO');
+    const techTacticsEv = evs.find(e => e.code === 'TECH_TACTICS');
+    const pixelPulseEv = evs.find(e => e.code === 'PIXEL_PULSE');
+
+    let targetEventId: string | undefined;
+    if (filters.eventSlug) {
+      const e = evs.find(ev => ev.slug === filters.eventSlug);
+      if (e) targetEventId = e.id;
+    } else if (filters.eventId) {
+      targetEventId = filters.eventId;
+    }
+
+    const rows: ClassificationRow[] = [];
+
+    parts.forEach(p => {
+      // Overall attendance: strictly attendance_type = 'OVERALL' AND status = 'ENTERED'
+      const overallAtt = atts.find(
+        a => a.participant_id === p.id && a.attendance_type === 'OVERALL' && a.status === 'ENTERED'
+      );
+
+      // Event attendance: strictly attendance_type = 'EVENT' AND event_id = targetEventId AND status = 'ENTERED'
+      const targetEventAtt = targetEventId
+        ? atts.find(
+            a => a.participant_id === p.id && a.attendance_type === 'EVENT' && a.event_id === targetEventId && a.status === 'ENTERED'
+          )
         : undefined;
 
-      const mappedAttendance = (atts || []).map((a: any) => ({
-        id: a.id,
-        participantId: a.participant_id,
-        attendanceType: a.attendance_type,
-        eventId: a.event_id,
-        coordinatorId: a.coordinator_id,
-        checkinTime: a.checkin_time,
-        status: a.status
-      }));
+      // Authoritative definition of ENTERED
+      const isEntered = targetEventId
+        ? Boolean(targetEventAtt)
+        : Boolean(overallAtt);
 
-      const mappedSelections = (sels || []).map((s: any) => ({
-        id: s.id,
-        participantId: s.participant_id,
-        eventId: s.event_id,
-        selectedAt: s.selected_at,
-        selectedBy: s.selected_by
-      }));
+      // Status filtering:
+      // When user chooses "Entered Participants", only entered participants are included.
+      if (filters.status === 'ENTERED' && !isEntered) return;
+      if (filters.status === 'NOT_ENTERED' && isEntered) return;
 
-      mockDatabase.syncLiveState(mappedParticipants, mappedAttendance, mappedSelections);
-    } catch (err) {
-      console.warn('Live state sync from Supabase encountered error:', err);
-    }
+      // Event selections
+      const hasCC = codeCrusadeEv && sels.some(s => s.participant_id === p.id && s.event_id === codeCrusadeEv.id);
+      const hasLA = logicArenaEv && sels.some(s => s.participant_id === p.id && s.event_id === logicArenaEv.id);
+      const hasUI = uiuxStudioEv && sels.some(s => s.participant_id === p.id && s.event_id === uiuxStudioEv.id);
+      const hasTT = techTacticsEv && sels.some(s => s.participant_id === p.id && s.event_id === techTacticsEv.id);
+      const hasPP = pixelPulseEv && sels.some(s => s.participant_id === p.id && s.event_id === pixelPulseEv.id);
+
+      // Filter by eventSelected if specified
+      if (filters.eventSelected && filters.eventSelected !== 'ALL') {
+        const targetEv = evs.find(
+          e => e.id === filters.eventSelected || e.slug === filters.eventSelected || e.code === filters.eventSelected
+        );
+        if (targetEv) {
+          const hasSelected = sels.some(s => s.participant_id === p.id && s.event_id === targetEv.id);
+          if (!hasSelected) return;
+        }
+      }
+
+      // Filter by coordinatorId if specified
+      const relevantAtt = targetEventId ? targetEventAtt : overallAtt;
+      if (filters.coordinatorId && filters.coordinatorId !== 'ALL') {
+        if (!relevantAtt || relevantAtt.coordinator_id !== filters.coordinatorId) return;
+      }
+
+      const coord = relevantAtt?.coordinator_id
+        ? coords.find(c => c.id === relevantAtt.coordinator_id)
+        : undefined;
+
+      // Event Check-ins
+      const ccAtt = codeCrusadeEv ? atts.find(a => a.participant_id === p.id && a.attendance_type === 'EVENT' && a.event_id === codeCrusadeEv.id && a.status === 'ENTERED') : undefined;
+      const laAtt = logicArenaEv ? atts.find(a => a.participant_id === p.id && a.attendance_type === 'EVENT' && a.event_id === logicArenaEv.id && a.status === 'ENTERED') : undefined;
+      const uiAtt = uiuxStudioEv ? atts.find(a => a.participant_id === p.id && a.attendance_type === 'EVENT' && a.event_id === uiuxStudioEv.id && a.status === 'ENTERED') : undefined;
+      const ttAtt = techTacticsEv ? atts.find(a => a.participant_id === p.id && a.attendance_type === 'EVENT' && a.event_id === techTacticsEv.id && a.status === 'ENTERED') : undefined;
+      const ppAtt = pixelPulseEv ? atts.find(a => a.participant_id === p.id && a.attendance_type === 'EVENT' && a.event_id === pixelPulseEv.id && a.status === 'ENTERED') : undefined;
+
+      const formatTime = (iso: string) => {
+        try {
+          const d = new Date(iso);
+          return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+        } catch {
+          return iso;
+        }
+      };
+
+      rows.push({
+        index: rows.length + 1,
+        passId: p.pass_id || 'UNISSUED',
+        name: p.name,
+        email: p.email,
+        phone: p.phone,
+        college: p.college,
+        department: p.department,
+        year: p.year,
+        checkinTime: relevantAtt?.checkin_time || '',
+        formattedTime: relevantAtt?.checkin_time ? formatTime(relevantAtt.checkin_time) : 'Not Entered',
+        coordinatorName: coord ? coord.name : relevantAtt ? 'Desk' : '-',
+        status: isEntered ? 'ENTERED' : 'NOT ENTERED',
+        eventName: targetEventId ? (evs.find(e => e.id === targetEventId)?.name || 'Event') : 'Overall Entry',
+        attendanceType: relevantAtt?.attendance_type || (targetEventId ? 'EVENT' : 'OVERALL'),
+
+        codeCrusadeSelected: hasCC ? 'YES' : 'NO',
+        logicArenaSelected: hasLA ? 'YES' : 'NO',
+        uiuxStudioSelected: hasUI ? 'YES' : 'NO',
+        techTacticsSelected: hasTT ? 'YES' : 'NO',
+        pixelPulseSelected: hasPP ? 'YES' : 'NO',
+
+        codeCrusadeCheckin: ccAtt?.checkin_time ? formatTime(ccAtt.checkin_time) : 'NOT CHECKED IN',
+        logicArenaCheckin: laAtt?.checkin_time ? formatTime(laAtt.checkin_time) : 'NOT CHECKED IN',
+        uiuxStudioCheckin: uiAtt?.checkin_time ? formatTime(uiAtt.checkin_time) : 'NOT CHECKED IN',
+        techTacticsCheckin: ttAtt?.checkin_time ? formatTime(ttAtt.checkin_time) : 'NOT CHECKED IN',
+        pixelPulseCheckin: ppAtt?.checkin_time ? formatTime(ppAtt.checkin_time) : 'NOT CHECKED IN'
+      });
+    });
+
+    return rows;
   }
 
   /**
    * Fetch classified participant attendance rows matching multi-dimensional filters.
+   * Uses canonical getFilteredParticipants for 100% consistency across all views.
    */
   async getClassificationRows(filters: ClassificationFilters): Promise<ClassificationRow[]> {
-    if (isSupabaseConfigured()) {
-      await this.syncLiveStateFromSupabase();
-    }
-    return mockDatabase.getClassificationRows(filters);
+    return this.getFilteredParticipants(filters);
   }
 
   /**
    * Fetch College-wise attendance breakdown matrix.
    */
   async getCollegeBreakdown(): Promise<CollegeBreakdownRow[]> {
-    if (isSupabaseConfigured()) {
-      await this.syncLiveStateFromSupabase();
-    }
-    return mockDatabase.getCollegeBreakdown();
+    const rows = await this.getFilteredParticipants({ status: 'ALL' });
+    const collegeMap = new Map<string, CollegeBreakdownRow>();
+
+    rows.forEach(r => {
+      if (!collegeMap.has(r.college)) {
+        collegeMap.set(r.college, {
+          college: r.college,
+          totalParticipants: 0,
+          overallAttendance: 0,
+          codeCrusade: 0,
+          logicArena: 0,
+          uiuxStudio: 0,
+          techTactics: 0,
+          pixelPulse: 0
+        });
+      }
+
+      const entry = collegeMap.get(r.college)!;
+      entry.totalParticipants++;
+      if (r.status === 'ENTERED') entry.overallAttendance++;
+      if (r.codeCrusadeCheckin !== 'NOT CHECKED IN') entry.codeCrusade++;
+      if (r.logicArenaCheckin !== 'NOT CHECKED IN') entry.logicArena++;
+      if (r.uiuxStudioCheckin !== 'NOT CHECKED IN') entry.uiuxStudio++;
+      if (r.techTacticsCheckin !== 'NOT CHECKED IN') entry.techTactics++;
+      if (r.pixelPulseCheckin !== 'NOT CHECKED IN') entry.pixelPulse++;
+    });
+
+    return Array.from(collegeMap.values()).sort((a, b) => b.overallAttendance - a.overallAttendance);
   }
 
   /**
    * Fetch Department-wise attendance breakdown matrix.
    */
   async getDepartmentBreakdown(): Promise<DepartmentBreakdownRow[]> {
-    if (isSupabaseConfigured()) {
-      await this.syncLiveStateFromSupabase();
+    const rows = await this.getFilteredParticipants({ status: 'ALL' });
+    const deptMap = new Map<string, DepartmentBreakdownRow>();
+
+    rows.forEach(r => {
+      const key = `${r.college}||${r.department}||${r.year}`;
+      if (!deptMap.has(key)) {
+        deptMap.set(key, {
+          college: r.college,
+          department: r.department,
+          year: r.year,
+          totalParticipants: 0,
+          overallAttendance: 0,
+          codeCrusade: 0,
+          logicArena: 0,
+          uiuxStudio: 0,
+          techTactics: 0,
+          pixelPulse: 0
+        });
+      }
+
+      const entry = deptMap.get(key)!;
+      entry.totalParticipants++;
+      if (r.status === 'ENTERED') entry.overallAttendance++;
+      if (r.codeCrusadeCheckin !== 'NOT CHECKED IN') entry.codeCrusade++;
+      if (r.logicArenaCheckin !== 'NOT CHECKED IN') entry.logicArena++;
+      if (r.uiuxStudioCheckin !== 'NOT CHECKED IN') entry.uiuxStudio++;
+      if (r.techTacticsCheckin !== 'NOT CHECKED IN') entry.techTactics++;
+      if (r.pixelPulseCheckin !== 'NOT CHECKED IN') entry.pixelPulse++;
+    });
+
+    return Array.from(deptMap.values()).sort((a, b) => b.overallAttendance - a.overallAttendance);
+  }
+
+  /**
+   * Subscribe to Supabase Realtime attendance changes.
+   * Returns an unsubscribe function to clean up when components unmount.
+   */
+  subscribeToAttendanceUpdates(onUpdate: () => void): () => void {
+    if (!isSupabaseConfigured()) {
+      return () => {};
     }
-    return mockDatabase.getDepartmentBreakdown();
+
+    try {
+      const channel = supabase
+        .channel(`attendance-sync-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`)
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'attendance' },
+          () => {
+            onUpdate();
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'participant_event_selections' },
+          () => {
+            onUpdate();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        try {
+          supabase.removeChannel(channel);
+        } catch {}
+      };
+    } catch (err) {
+      console.warn('Realtime subscription error:', err);
+      return () => {};
+    }
   }
 
   /**
@@ -414,6 +637,7 @@ class AttendanceService {
           .select('id, checkin_time, coordinator_id, coordinators(name)')
           .eq('participant_id', pData.id)
           .eq('attendance_type', 'OVERALL')
+          .eq('status', 'ENTERED')
           .maybeSingle();
 
         if (attData) {
@@ -451,10 +675,14 @@ class AttendanceService {
         };
       } catch (err: any) {
         console.error('validateParticipantPass error:', err);
+        return {
+          status: 'ERROR',
+          error: 'Unable to connect to database. Please check your connection and try again.'
+        };
       }
     }
 
-    // Fallback to mockDatabase
+    // Fallback to mockDatabase ONLY when Supabase is not configured
     const p = mockDatabase.findParticipantByQr(cleanToken);
     if (!p) {
       return { status: 'INVALID_TOKEN', error: 'Pass not registered for this event.' };
@@ -474,7 +702,7 @@ class AttendanceService {
     };
 
     const overallAtt = (mockDatabase as any).attendance?.find(
-      (a: any) => a.participantId === p.id && a.attendanceType === 'OVERALL'
+      (a: any) => a.participantId === p.id && a.attendanceType === 'OVERALL' && a.status === 'ENTERED'
     );
 
     if (overallAtt) {
@@ -519,7 +747,7 @@ class AttendanceService {
    * Keeps all participants, events, and coordinator records intact.
    */
   async resetScanData(coordinatorId?: string): Promise<{ success: boolean; error?: string }> {
-    // 1. Always reset local mock database and localStorage
+    // 1. Reset local mock database
     mockDatabase.resetScanData();
     if (typeof window !== 'undefined' && window.localStorage) {
       localStorage.removeItem('vyugam_supabase_attendance_mock_v2');
@@ -555,8 +783,6 @@ class AttendanceService {
             .neq('id', '00000000-0000-0000-0000-000000000000');
         }
 
-        // Re-sync local state from Supabase to guarantee synchronized 0 state
-        await this.syncLiveStateFromSupabase();
         return { success: true };
       } catch (err: any) {
         console.error('Reset scan data failed in Supabase:', err);

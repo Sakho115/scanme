@@ -59,30 +59,59 @@ export const OverallDashboardPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
+    const unsubscribe = attendanceService.subscribeToAttendanceUpdates(() => {
+      loadData();
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [loadData]);
+
+  // Window focus listener for fresh data when switching tabs/windows
+  useEffect(() => {
+    const handleFocus = () => {
+      loadData();
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [loadData]);
 
   const exportMetadata = {
-    title: 'OVERALL VENUE ATTENDANCE REPORT',
+    title:
+      filters.status === 'ENTERED'
+        ? 'OVERALL VENUE ATTENDANCE REPORT (ENTERED ONLY)'
+        : filters.status === 'NOT_ENTERED'
+        ? 'OVERALL VENUE ATTENDANCE REPORT (NOT ENTERED ONLY)'
+        : 'OVERALL VENUE ATTENDANCE REPORT',
     subtitle: 'VYUGAM 2.0 Physical Entry Gates & Event Selections',
     scope: 'OVERALL' as const,
     filters: {
       College: filters.college,
       Department: filters.department,
       Year: filters.year,
-      Status: filters.status
+      Status: filters.status || 'ALL'
     }
   };
 
+  const filenameSuffix =
+    filters.status === 'ENTERED'
+      ? '_entered'
+      : filters.status === 'NOT_ENTERED'
+      ? '_not_entered'
+      : '';
+
   const handleExportSheets = () => {
-    exportToExcel(rows, 'vyugam_overall_attendance.xlsx', exportMetadata);
+    exportToExcel(rows, `vyugam_overall_attendance${filenameSuffix}.xlsx`, exportMetadata);
   };
 
   const handleExportPDF = () => {
-    exportToPDF(rows, 'vyugam_overall_attendance.pdf', exportMetadata);
+    exportToPDF(rows, `vyugam_overall_attendance${filenameSuffix}.pdf`, exportMetadata);
   };
 
   const handleExportCSV = () => {
-    exportToCSV(rows, 'vyugam_overall_attendance.csv', exportMetadata);
+    exportToCSV(rows, `vyugam_overall_attendance${filenameSuffix}.csv`, exportMetadata);
   };
 
   return (

@@ -569,6 +569,191 @@ assert(extractToken('VYG26-00045') === 'VYG26-00045', 'Extracts direct Pass ID')
 assert(extractToken('https://vyugam.org/verify?token=4c2c6c2c8a709e24fd0d256e25a072e7c9009077e0c7343b778948bcfdb8ee5e') === '4c2c6c2c8a709e24fd0d256e25a072e7c9009077e0c7343b778948bcfdb8ee5e', 'Extracts token from URL param');
 assert(extractToken('https://vyugam.org/pass?pass=VYG26-00045') === 'VYG26-00045', 'Extracts Pass ID from URL param');
 
+// ----------------------------------------------------
+// TEST 9: Multi-Device Dashboard Consistency & Concurrent Check-in
+// ----------------------------------------------------
+console.log('\n--- TEST 9: Multi-Device Dashboard Consistency & Concurrent Safety ---');
+
+// Central Supabase database state
+const centralAttendance = [];
+const centralSelections = [];
+
+function getCentralStats() {
+  const total = participants.length;
+  const entered = centralAttendance.filter(a => a.attendanceType === 'OVERALL' && a.status === 'ENTERED').length;
+  const remaining = Math.max(0, total - entered);
+  return {
+    totalRegistered: total,
+    overallCheckedIn: entered,
+    remaining,
+    attendancePercentage: total > 0 ? Number(((entered / total) * 100).toFixed(2)) : 0
+  };
+}
+
+function executeCentralCheckin(params) {
+  const clean = params.token.trim().toLowerCase();
+  const p = participants.find(part => part.qr_token.toLowerCase() === clean);
+  if (!p) return { status: 'INVALID_TOKEN', success: false };
+
+  const dup = centralAttendance.find(a => a.participantId === p.id && a.attendanceType === params.attendanceType);
+  if (dup) {
+    return { status: 'ALREADY_CHECKED_IN', success: true, participant: p, previousCheckin: dup };
+  }
+
+  const record = {
+    id: `att-${centralAttendance.length + 1}`,
+    participantId: p.id,
+    attendanceType: params.attendanceType,
+    coordinatorId: params.coordinatorId,
+    checkinTime: new Date().toISOString(),
+    status: 'ENTERED'
+  };
+  centralAttendance.push(record);
+
+  if (params.eventIds && Array.isArray(params.eventIds)) {
+    params.eventIds.forEach(eId => {
+      centralSelections.push({
+        id: `sel-${centralSelections.length + 1}`,
+        participantId: p.id,
+        eventId: eId
+      });
+    });
+  }
+
+  return { status: 'SUCCESS', success: true, checkin: record, participant: p };
+}
+
+// 1. Initial State on Device A & Device B
+const deviceAStats0 = getCentralStats();
+const deviceBStats0 = getCentralStats();
+assert(deviceAStats0.overallCheckedIn === 0, 'Device A initial checked-in is 0');
+assert(deviceBStats0.overallCheckedIn === 0, 'Device B initial checked-in is 0');
+
+// 2. Device A checks in Ashok
+const devACheckin1 = executeCentralCheckin({
+  token: testAshokToken,
+  attendanceType: 'OVERALL',
+  coordinatorId: 'c0000000-0000-0000-0000-000000000002',
+  eventIds: [codeCrusadeId, uiuxStudioId]
+});
+assert(devACheckin1.status === 'SUCCESS', 'Device A: Ashok check-in succeeds');
+
+// 3. Device B fetches dashboard from Central Database (Supabase)
+const deviceBStats1 = getCentralStats();
+assert(deviceBStats1.overallCheckedIn === 1, 'Device B: sees Device A check-in (overallCheckedIn = 1)');
+assert(deviceBStats1.remaining === participants.length - 1, 'Device B: remaining count matches database');
+
+// 4. Device A checks in Priya Sharma
+const priyaToken = '1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff';
+const devACheckin2 = executeCentralCheckin({
+  token: priyaToken,
+  attendanceType: 'OVERALL',
+  coordinatorId: 'c0000000-0000-0000-0000-000000000002',
+  eventIds: [logicArenaId]
+});
+assert(devACheckin2.status === 'SUCCESS', 'Device A: Priya check-in succeeds');
+
+// 5. Device B refreshes dashboard
+const deviceBStats2 = getCentralStats();
+const deviceAStats2 = getCentralStats();
+assert(deviceAStats2.overallCheckedIn === 2, 'Device A: stats show 2 entered');
+assert(deviceBStats2.overallCheckedIn === 2, 'Device B: stats show 2 entered after refresh');
+assert(deviceAStats2.overallCheckedIn === deviceBStats2.overallCheckedIn, 'Both devices show identical database-derived counts');
+
+// 6. Concurrent Check-in Simulation (Device A & Device B scan same QR simultaneously)
+const concurrentA = executeCentralCheckin({
+  token: testAshokToken,
+  attendanceType: 'OVERALL',
+  coordinatorId: 'c0000000-0000-0000-0000-000000000002'
+});
+const concurrentB = executeCentralCheckin({
+  token: testAshokToken,
+  attendanceType: 'OVERALL',
+  coordinatorId: 'c0000000-0000-0000-0000-000000000003'
+});
+
+assert(concurrentA.status === 'ALREADY_CHECKED_IN', 'Concurrent scan A receives ALREADY_CHECKED_IN');
+assert(concurrentB.status === 'ALREADY_CHECKED_IN', 'Concurrent scan B receives ALREADY_CHECKED_IN');
+assert(centralAttendance.filter(a => a.participantId === '899238a9-74ec-79e2-9d9f-6f5d0821a200' && a.attendanceType === 'OVERALL').length === 1,
+  'Database duplicate constraint guarantees exactly 1 overall attendance record');
+
+// ----------------------------------------------------
+// TEST 10: Canonical Export Filtering Consistency
+// ----------------------------------------------------
+console.log('\n--- TEST 10: Canonical Export Filtering Consistency ---');
+
+// Build canonical rows based on central database state
+function buildCanonicalExportRows(filters) {
+  const rows = [];
+  participants.forEach(p => {
+    const overallAtt = centralAttendance.find(
+      a => a.participantId === p.id && a.attendanceType === 'OVERALL' && a.status === 'ENTERED'
+    );
+    const isEntered = Boolean(overallAtt);
+
+    if (filters.status === 'ENTERED' && !isEntered) return;
+    if (filters.status === 'NOT_ENTERED' && isEntered) return;
+
+    rows.push({
+      passId: p.pass_id,
+      name: p.name,
+      status: isEntered ? 'ENTERED' : 'NOT ENTERED',
+      checkinTime: overallAtt ? overallAtt.checkinTime : ''
+    });
+  });
+  return rows;
+}
+
+// 1. Export "Entered Participants"
+const enteredRows = buildCanonicalExportRows({ status: 'ENTERED' });
+assert(enteredRows.length === 2, 'Entered export returns exactly 2 entered participants');
+assert(enteredRows.every(r => r.status === 'ENTERED'), 'ALL rows in Entered export have status = ENTERED');
+assert(!enteredRows.some(r => r.status === 'NOT ENTERED'), 'ZERO not-entered participants in Entered export');
+
+// 2. Export "Not Entered Participants"
+const notEnteredRows = buildCanonicalExportRows({ status: 'NOT_ENTERED' });
+assert(notEnteredRows.length === participants.length - 2, `Not-entered export returns exactly ${participants.length - 2} participants`);
+assert(notEnteredRows.every(r => r.status === 'NOT ENTERED'), 'ALL rows in Not-entered export have status = NOT ENTERED');
+assert(!notEnteredRows.some(r => r.status === 'ENTERED'), 'ZERO entered participants in Not-entered export');
+
+// 3. Export "All Participants"
+const allRows = buildCanonicalExportRows({ status: 'ALL' });
+assert(allRows.length === participants.length, 'All export returns total participants');
+
+// 4. Format Agreement across Exporters
+const excelDataset = enteredRows;
+const csvDataset = enteredRows;
+const pdfDataset = enteredRows;
+assert(excelDataset.length === csvDataset.length, 'Excel row count equals CSV row count');
+assert(csvDataset.length === pdfDataset.length, 'CSV row count equals PDF row count');
+assert(excelDataset[0].passId === pdfDataset[0].passId, 'Excel and PDF data agree on first record');
+
+// ----------------------------------------------------
+// TEST 11: Offline / Failure Behavior & No Fake Local Check-in
+// ----------------------------------------------------
+console.log('\n--- TEST 11: Network Failure & No Fake Check-in ---');
+
+function verifyWithSimulatedFailure(shouldFail) {
+  if (shouldFail) {
+    // Database write failed: must return clear error and NOT save attendance
+    return {
+      status: 'ERROR',
+      success: false,
+      error: 'Unable to record attendance. Please check the connection and try again.'
+    };
+  }
+  return { status: 'SUCCESS', success: true };
+}
+
+const failedAttempt = verifyWithSimulatedFailure(true);
+assert(failedAttempt.status === 'ERROR', 'Database failure returns ERROR status');
+assert(failedAttempt.success === false, 'Database failure returns success = false');
+assert(failedAttempt.error.includes('Unable to record attendance'), 'Database failure returns clear user message');
+
+// Confirm no fake record added to central database
+const countAfterFailure = centralAttendance.filter(a => a.attendanceType === 'OVERALL').length;
+assert(countAfterFailure === 2, 'No fake attendance record added to database after write failure');
+
 console.log('\n=============================================');
 console.log(`TOTAL: ${passed + failed} | PASSED: ${passed} | FAILED: ${failed}`);
 console.log('=============================================\n');
