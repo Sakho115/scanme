@@ -139,3 +139,4 @@ SUPABASE_SERVICE_ROLE_KEY=your-service-role-key # optional for administrative sc
 2. Build command: `npm run build`
 3. Output directory: `dist`
 4. Add the `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` environment variables.
+# scanme
