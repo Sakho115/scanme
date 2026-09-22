@@ -245,17 +245,30 @@ class AttendanceService {
   }
 
   /**
+   * Resolve an event by slug, code, or UUID from cached/live metadata.
+   */
+  async resolveEvent(eventSlugOrId: string): Promise<any | null> {
+    const { events: evs } = await this.getStaticMetadata();
+    const clean = eventSlugOrId.trim();
+    const slugForm = clean.toLowerCase().replace(/_/g, '-');
+    const codeForm = clean.toUpperCase().replace(/-/g, '_');
+    
+    return evs.find(e =>
+      e.id === clean ||
+      e.slug === slugForm ||
+      e.code === codeForm ||
+      e.code?.toLowerCase().replace(/_/g, '-') === slugForm ||
+      e.name?.toLowerCase() === clean.toLowerCase()
+    ) || null;
+  }
+
+  /**
    * Fetch Event Attendance statistics for one of the 5 events from Supabase.
    */
   async getEventStats(eventSlugOrId: string): Promise<EventStats | null> {
     if (isSupabaseConfigured()) {
       try {
-        // Resolve event
-        const { data: eventData } = await supabase
-          .from('events')
-          .select('*')
-          .or(`id.eq.${eventSlugOrId},code.ilike.${eventSlugOrId.replace('-', '_')}`)
-          .single();
+        const eventData = await this.resolveEvent(eventSlugOrId);
 
         if (eventData) {
           const [
@@ -324,7 +337,7 @@ class AttendanceService {
           return {
             eventId: eventData.id,
             eventCode: eventData.code,
-            eventSlug: eventData.code.toLowerCase().replace('_', '-') as any,
+            eventSlug: (eventData.slug || eventData.code.toLowerCase().replace(/_/g, '-')) as any,
             eventName: eventData.name,
             totalRegistered: total,
             overallAttendees: overall,
@@ -356,12 +369,12 @@ class AttendanceService {
       return { events: this.cachedEvents, coordinators: this.cachedCoordinators };
     }
     const [{ data: evs }, { data: coords }] = await Promise.all([
-      supabase.from('events').select('id, code, name'),
-      supabase.from('coordinators').select('id, name, coordinator_code')
+      supabase.from('events').select('id, code, name, description, status'),
+      supabase.from('coordinators').select('id, name, coordinator_code, role, event_id, active')
     ]);
     const normalizedEvents = (evs || []).map((e: any) => ({
       ...e,
-      slug: e.code ? e.code.toLowerCase().replace('_', '-') : ''
+      slug: e.code ? e.code.toLowerCase().replace(/_/g, '-') : ''
     }));
     if (normalizedEvents.length > 0) this.cachedEvents = normalizedEvents;
     if (coords && coords.length > 0) this.cachedCoordinators = coords;
@@ -376,20 +389,19 @@ class AttendanceService {
   async getFilteredParticipants(filters: ClassificationFilters): Promise<ClassificationRow[]> {
     if (isSupabaseConfigured()) {
       try {
-        // Fast path for ENTERED: query only verified check-ins from attendance table
-        // This ensures the master unentered participant records are NEVER downloaded to the browser
+        const { events: evs, coordinators: coords } = await this.getStaticMetadata();
+
+        let targetEventId: string | undefined = filters.eventId;
+        if (!targetEventId && filters.eventSlug) {
+          const matched = evs.find(
+            e => e.slug === filters.eventSlug || e.code?.toLowerCase().replace(/_/g, '-') === filters.eventSlug
+          );
+          if (matched) targetEventId = matched.id;
+        }
+
+        // Fast path for ENTERED: query verified check-ins from attendance table
         if (filters.status === 'ENTERED') {
-          const { events: evs, coordinators: coords } = await this.getStaticMetadata();
-
-          let targetEventId: string | undefined = filters.eventId;
-          if (!targetEventId && filters.eventSlug) {
-            const matched = evs.find(
-              e => e.slug === filters.eventSlug || e.code?.toLowerCase().replace('_', '-') === filters.eventSlug
-            );
-            if (matched) targetEventId = matched.id;
-          }
-
-          let attQuery = supabase
+          let primaryAttQuery = supabase
             .from('attendance')
             .select(`
               id, participant_id, attendance_type, event_id, coordinator_id, checkin_time, status,
@@ -398,16 +410,21 @@ class AttendanceService {
             .eq('status', 'ENTERED');
 
           if (targetEventId) {
-            attQuery = attQuery.eq('attendance_type', 'EVENT').eq('event_id', targetEventId);
+            primaryAttQuery = primaryAttQuery.eq('attendance_type', 'EVENT').eq('event_id', targetEventId);
           } else {
-            attQuery = attQuery.eq('attendance_type', 'OVERALL');
+            primaryAttQuery = primaryAttQuery.eq('attendance_type', 'OVERALL');
           }
 
           const [
             { data: attRecords, error: attErr },
+            { data: allEnteredAtts },
             { data: sels }
           ] = await Promise.all([
-            attQuery,
+            primaryAttQuery,
+            supabase
+              .from('attendance')
+              .select('id, participant_id, attendance_type, event_id, coordinator_id, checkin_time, status')
+              .eq('status', 'ENTERED'),
             supabase.from('participant_event_selections').select('id, participant_id, event_id')
           ]);
 
@@ -438,7 +455,7 @@ class AttendanceService {
             const parts = filteredAtt.map((a: any) => a.participants);
             return this.buildCanonicalRows(
               parts,
-              filteredAtt,
+              allEnteredAtts || filteredAtt,
               sels || [],
               evs || [],
               coords || [],
@@ -466,13 +483,11 @@ class AttendanceService {
         const [
           { data: parts, error: partsErr },
           { data: atts },
-          { data: sels },
-          { events: evs, coordinators: coords }
+          { data: sels }
         ] = await Promise.all([
           query,
           supabase.from('attendance').select('id, participant_id, attendance_type, event_id, coordinator_id, checkin_time, status').eq('status', 'ENTERED'),
-          supabase.from('participant_event_selections').select('id, participant_id, event_id'),
-          this.getStaticMetadata()
+          supabase.from('participant_event_selections').select('id, participant_id, event_id')
         ]);
 
         if (!partsErr && parts) {

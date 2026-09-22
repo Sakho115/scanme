@@ -55,6 +55,20 @@ export const AttendanceScannerPage: React.FC<AttendanceScannerPageProps> = ({ fo
       const ev = getEventBySlug(eventSlug);
       setTargetEvent(ev);
 
+      // Also dynamically resolve database event metadata to guarantee UUID consistency
+      attendanceService.resolveEvent(eventSlug).then(dbEv => {
+        if (dbEv) {
+          setTargetEvent({
+            id: dbEv.id,
+            code: dbEv.code,
+            slug: dbEv.slug || eventSlug,
+            name: dbEv.name,
+            description: dbEv.description || ev?.description || '',
+            status: dbEv.status || 'ACTIVE'
+          } as any);
+        }
+      });
+
       if (!ev) {
         setIsAuthorized(false);
         return;

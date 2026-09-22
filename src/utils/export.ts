@@ -68,41 +68,42 @@ export function exportToCSV(
       '#',
       'Pass ID',
       'Participant Name',
-      'Email',
-      'Phone',
       'College',
       'Department',
       'Year',
-      `Selected for ${eventInfo.name}`,
+      'Email',
+      'Phone',
       'Event Attendance Status',
       'Event Check-in Time',
+      'Gate Entry Status',
+      'Gate Entry Time',
       'Coordinator'
     ];
   } else {
-    // Overall Attendance / Global Sheet: Clearly includes events interested in + all selections
+    // Overall Attendance / Global Sheet: Clearly includes participant info, gate status & event selections
     headers = [
       '#',
       'Pass ID',
       'Participant Name',
-      'Email',
-      'Phone',
       'College',
       'Department',
       'Year',
-      'Overall Attendance',
-      'Overall Check-in Time',
-      'Events Interested In (Selected Events)',
-      'Code Crusade Selected',
-      'Logic Arena Selected',
-      'UI/UX Studio Selected',
-      'Tech Tactics Selected',
-      'Pixel Pulse Selected',
-      'Code Crusade Check-in',
-      'Logic Arena Check-in',
-      'UI/UX Studio Check-in',
-      'Tech Tactics Check-in',
-      'Pixel Pulse Check-in',
-      'Coordinator'
+      'Email',
+      'Phone',
+      'Gate Entry Status',
+      'Gate Entry Time',
+      'Selected Events',
+      'Code Crusade',
+      'Logic Arena',
+      'UI/UX Studio',
+      'Tech Tactics',
+      'Pixel Pulse',
+      'Code Crusade Check-in Time',
+      'Logic Arena Check-in Time',
+      'UI/UX Studio Check-in Time',
+      'Tech Tactics Check-in Time',
+      'Pixel Pulse Check-in Time',
+      'Gate Coordinator'
     ];
   }
 
@@ -121,14 +122,15 @@ export function exportToCSV(
         String(idx + 1),
         r.passId,
         r.name,
-        r.email || '',
-        r.phone || '',
         r.college,
         r.department,
         r.year,
-        r[eventInfo.selectedKey] || 'NO',
-        isCheckedIn ? 'CHECKED IN' : 'NOT CHECKED IN',
+        r.email || '',
+        r.phone || '',
+        isCheckedIn ? 'CHECKED IN' : 'PENDING CHECK-IN',
         r[eventInfo.checkinKey] || 'NOT CHECKED IN',
+        r.status,
+        r.formattedTime,
         r.coordinatorName
       ];
     } else {
@@ -136,19 +138,19 @@ export function exportToCSV(
         String(idx + 1),
         r.passId,
         r.name,
-        r.email || '',
-        r.phone || '',
         r.college,
         r.department,
         r.year,
+        r.email || '',
+        r.phone || '',
         r.status,
         r.formattedTime,
         getInterestedEvents(r),
-        r.codeCrusadeSelected || 'NO',
-        r.logicArenaSelected || 'NO',
-        r.uiuxStudioSelected || 'NO',
-        r.techTacticsSelected || 'NO',
-        r.pixelPulseSelected || 'NO',
+        r.codeCrusadeSelected === 'YES' ? 'SELECTED' : 'NO',
+        r.logicArenaSelected === 'YES' ? 'SELECTED' : 'NO',
+        r.uiuxStudioSelected === 'YES' ? 'SELECTED' : 'NO',
+        r.techTacticsSelected === 'YES' ? 'SELECTED' : 'NO',
+        r.pixelPulseSelected === 'YES' ? 'SELECTED' : 'NO',
         r.codeCrusadeCheckin || 'NOT CHECKED IN',
         r.logicArenaCheckin || 'NOT CHECKED IN',
         r.uiuxStudioCheckin || 'NOT CHECKED IN',
@@ -166,7 +168,7 @@ export function exportToCSV(
 }
 
 /**
- * Professional Excel XML Spreadsheet (.xlsx compatible) export
+ * Professional Excel Spreadsheet (.xlsx) export
  */
 export function exportToExcel(
   rows: ClassificationRow[],
@@ -187,32 +189,34 @@ export function exportToExcel(
         '#': idx + 1,
         'Pass ID': r.passId,
         'Participant Name': r.name,
-        'Email': r.email || '',
-        'Phone': r.phone || '',
         'College': r.college,
         'Department': r.department,
         'Year': r.year,
-        [`Selected for ${eventInfo.name}`]: r[eventInfo.selectedKey] || 'NO',
-        'Event Attendance Status': isCheckedIn ? 'CHECKED IN' : 'NOT CHECKED IN',
+        'Phone': r.phone || '',
+        'Email': r.email || '',
+        'Event Attendance Status': isCheckedIn ? 'CHECKED IN' : 'PENDING CHECK-IN',
         'Event Check-in Time': r[eventInfo.checkinKey] || 'NOT CHECKED IN',
+        'Gate Entry Status': r.status,
+        'Gate Entry Time': r.formattedTime,
         'Coordinator': r.coordinatorName
       };
     });
 
     const ws = XLSX.utils.json_to_sheet(dataRows);
     ws['!cols'] = [
-      { wch: 5 },
+      { wch: 6 },
       { wch: 16 },
-      { wch: 24 },
       { wch: 26 },
-      { wch: 14 },
-      { wch: 30 },
-      { wch: 24 },
+      { wch: 34 },
+      { wch: 22 },
       { wch: 10 },
+      { wch: 16 },
+      { wch: 28 },
       { wch: 24 },
-      { wch: 24 },
+      { wch: 22 },
+      { wch: 18 },
       { wch: 20 },
-      { wch: 18 }
+      { wch: 20 }
     ];
 
     const wb = XLSX.utils.book_new();
@@ -225,39 +229,63 @@ export function exportToExcel(
   }
 
   // Case 2: Overall Attendance Multi-Sheet Workbook
-  // Generates Sheet 1 (Overall Venue Entry) + Dedicated Sheets for each event
-  // If a participant chose 2-3 events, they appear in all 3 event sheets!
+  // Generates Sheet 1 (Overall Venue Attendance) + Dedicated Sheets for each event
+  // If a participant chose 2-3 events, they appear in all chosen event sheets!
   const wb = XLSX.utils.book_new();
 
-  // 1. Overall Venue Entry Sheet
+  // Helper for event status string in Overall Sheet
+  const getEventOverallStatus = (isSelected?: string, checkinVal?: string) => {
+    if (checkinVal && checkinVal !== 'NOT CHECKED IN') {
+      return `CHECKED IN (${checkinVal})`;
+    }
+    if (isSelected === 'YES') {
+      return 'SELECTED (Awaiting Entry)';
+    }
+    return 'NOT SELECTED';
+  };
+
+  // 1. Overall Venue Attendance Sheet
   const overallDataRows = rows.map((r, idx) => ({
     '#': idx + 1,
     'Pass ID': r.passId,
     'Participant Name': r.name,
-    'Email': r.email || '',
-    'Phone': r.phone || '',
     'College': r.college,
     'Department': r.department,
     'Year': r.year,
-    'Overall Gate Status': r.status,
-    'Gate Check-in Time': r.formattedTime,
-    'Events Interested In (Selected Events)': getInterestedEvents(r),
-    'Code Crusade Selected': r.codeCrusadeSelected || 'NO',
-    'Logic Arena Selected': r.logicArenaSelected || 'NO',
-    'UI/UX Studio Selected': r.uiuxStudioSelected || 'NO',
-    'Tech Tactics Selected': r.techTacticsSelected || 'NO',
-    'Pixel Pulse Selected': r.pixelPulseSelected || 'NO',
+    'Phone': r.phone || '',
+    'Email': r.email || '',
+    'Gate Entry Status': r.status,
+    'Gate Entry Time': r.formattedTime,
+    'Selected Events': getInterestedEvents(r),
+    'Code Crusade': getEventOverallStatus(r.codeCrusadeSelected, r.codeCrusadeCheckin),
+    'Logic Arena': getEventOverallStatus(r.logicArenaSelected, r.logicArenaCheckin),
+    'UI/UX Studio': getEventOverallStatus(r.uiuxStudioSelected, r.uiuxStudioCheckin),
+    'Tech Tactics': getEventOverallStatus(r.techTacticsSelected, r.techTacticsCheckin),
+    'Pixel Pulse': getEventOverallStatus(r.pixelPulseSelected, r.pixelPulseCheckin),
     'Gate Coordinator': r.coordinatorName
   }));
 
   const wsOverall = XLSX.utils.json_to_sheet(overallDataRows);
   wsOverall['!cols'] = [
-    { wch: 5 }, { wch: 16 }, { wch: 24 }, { wch: 26 }, { wch: 14 },
-    { wch: 32 }, { wch: 24 }, { wch: 10 }, { wch: 18 }, { wch: 20 },
-    { wch: 38 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 },
-    { wch: 20 }, { wch: 18 }
+    { wch: 6 },
+    { wch: 16 },
+    { wch: 26 },
+    { wch: 34 },
+    { wch: 22 },
+    { wch: 10 },
+    { wch: 16 },
+    { wch: 28 },
+    { wch: 18 },
+    { wch: 20 },
+    { wch: 36 },
+    { wch: 26 },
+    { wch: 26 },
+    { wch: 26 },
+    { wch: 26 },
+    { wch: 26 },
+    { wch: 20 }
   ];
-  XLSX.utils.book_append_sheet(wb, wsOverall, 'Overall Venue Entry');
+  XLSX.utils.book_append_sheet(wb, wsOverall, 'Overall Venue Attendance');
 
   // 2. Individual Event Sheets (Each attendee who chose the event is included)
   const eventDefinitions = [
@@ -276,24 +304,34 @@ export function exportToExcel(
         '#': idx + 1,
         'Pass ID': r.passId,
         'Participant Name': r.name,
-        'Email': r.email || '',
-        'Phone': r.phone || '',
         'College': r.college,
         'Department': r.department,
         'Year': r.year,
-        'Selected Event': evDef.name,
-        'Gate Entry Time': r.formattedTime,
-        'Event Attendance Status': isCheckedIn ? 'CHECKED IN' : 'NOT CHECKED IN',
+        'Phone': r.phone || '',
+        'Email': r.email || '',
+        'Event Attendance Status': isCheckedIn ? 'CHECKED IN' : 'PENDING CHECK-IN',
         'Event Check-in Time': r[evDef.checkinKey] || 'NOT CHECKED IN',
-        'Gate Coordinator': r.coordinatorName
+        'Gate Entry Status': r.status,
+        'Gate Entry Time': r.formattedTime,
+        'Coordinator': r.coordinatorName
       };
     });
 
     const wsEvent = XLSX.utils.json_to_sheet(eventSheetData);
     wsEvent['!cols'] = [
-      { wch: 5 }, { wch: 16 }, { wch: 24 }, { wch: 26 }, { wch: 14 },
-      { wch: 32 }, { wch: 24 }, { wch: 10 }, { wch: 20 }, { wch: 20 },
-      { wch: 24 }, { wch: 22 }, { wch: 18 }
+      { wch: 6 },
+      { wch: 16 },
+      { wch: 26 },
+      { wch: 34 },
+      { wch: 22 },
+      { wch: 10 },
+      { wch: 16 },
+      { wch: 28 },
+      { wch: 24 },
+      { wch: 22 },
+      { wch: 18 },
+      { wch: 20 },
+      { wch: 20 }
     ];
     XLSX.utils.book_append_sheet(wb, wsEvent, evDef.name.substring(0, 31));
   });
